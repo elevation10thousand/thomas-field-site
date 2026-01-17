@@ -1,608 +1,507 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import {
-  ThomasWx,
-  ageSeconds,
-  metarLikeLine1,
-  metarLikeLine2,
-  pickWindDirDeg,
-} from "../../lib/tf";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
-const CALM_KT = 2.0; // show CALM when wind < 2 kt
-const WARNING_SECONDS = 300; // 5 minutes
-const WEDGE_SPREAD_MIN_DEG = 8; // show wedge if spread > this, OR wind_dir_variable==1
+type Wx = {
+  ts_unix_s?: number;
 
-function fmtAge(s: number) {
-  if (!isFinite(s) || s < 0) return "—";
-  if (s < 60) return `${Math.round(s)}s ago`;
-  const m = Math.floor(s / 60);
-  const r = Math.round(s % 60);
-  return `${m}m ${r}s ago`;
+  // wind
+  wind_dir_deg?: number;
+  wind_dir_avg_deg?: number;
+  wind_dir_gust_deg?: number;
+  wind_speed_kt?: number;
+  wind_gust_kt?: number;
+
+  // thermodynamics
+  temp_f?: number;
+  dewpoint_f?: number;
+  altimeter_inhg?: number;
+  da_ft?: number;
+
+  // runway
+  rec_rwy?: string;
+
+  // advisory
+  advisory?: string;
+  rec_reason?: string;
+};
+
+/* ---------------- helpers ---------------- */
+
+function isNum(x: any): x is number {
+  return typeof x === "number" && Number.isFinite(x);
 }
 
+function clamp360(deg: number) {
+  let d = deg % 360;
+  if (d < 0) d += 360;
+  return d;
+}
+
+function zulu(tsUnixS?: number) {
+  if (!isNum(tsUnixS)) return "----Z";
+  const d = new Date(tsUnixS * 1000);
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${hh}${mm}Z`;
+}
+
+function fmt1(x?: number) {
+  return isNum(x) ? x.toFixed(1) : "—";
+}
+
+function pickDirDeg(wx?: Wx): number | null {
+  const cand = [wx?.wind_dir_deg, wx?.wind_dir_avg_deg, wx?.wind_dir_gust_deg];
+  for (const v of cand) if (isNum(v)) return clamp360(v);
+  return null;
+}
+
+function pickSpdKt(wx?: Wx): number | null {
+  return isNum(wx?.wind_speed_kt) ? wx.wind_speed_kt : null;
+}
+
+function pickGustKt(wx?: Wx): number | null {
+  return isNum(wx?.wind_gust_kt) ? wx.wind_gust_kt : null;
+}
+
+function altGroupA(wx?: Wx) {
+  if (!isNum(wx?.altimeter_inhg)) return "A----";
+  const n = Math.round(wx.altimeter_inhg * 100);
+  return `A${String(n).padStart(4, "0")}`;
+}
+
+/**
+ * Wind group rules:
+ * - If speed < 2kt => "CALM"
+ * - If calm BUT gust exists >= 2kt => "CALM G12KT"
+ * - Else standard 28012G18KT
+ */
+function windGroup(wx?: Wx) {
+  const spd = pickSpdKt(wx);
+  const gst = pickGustKt(wx);
+  const dir = pickDirDeg(wx);
+
+  if (spd !== null && spd < 2) {
+    if (gst !== null && gst >= 2) {
+      return `CALM G${String(Math.round(gst)).padStart(2, "0")}KT`;
+    }
+    return "CALM";
+  }
+
+  const dirStr = dir === null ? "///" : String(Math.round(dir)).padStart(3, "0");
+  const spdStr = spd === null ? "__" : String(Math.round(spd)).padStart(2, "0");
+
+  let gustStr = "";
+  if (gst !== null && spd !== null && gst >= spd + 2) {
+    gustStr = `G${String(Math.round(gst)).padStart(2, "0")}`;
+  }
+
+  return `${dirStr}${spdStr}${gustStr}KT`;
+}
+
+/** Your desired order: field, time, wind, temp, dp, alt, da */
+function topLine(wx?: Wx) {
+  const station = "Thomas_FLD";
+  const t = zulu(wx?.ts_unix_s);
+  const w = windGroup(wx);
+
+  const temp = fmt1(wx?.temp_f);
+  const dp = fmt1(wx?.dewpoint_f);
+  const a = altGroupA(wx);
+  const da = isNum(wx?.da_ft) ? `${Math.round(wx.da_ft)}ft` : "—";
+
+  return `${station} ${t} ${w}  TEMP ${temp}F  DP ${dp}F  ${a}  DA ${da}`;
+}
+
+function fmtAge(ageSec: number | null) {
+  if (ageSec === null) return "—";
+  if (ageSec < 60) return `${ageSec}s old`;
+  const m = Math.floor(ageSec / 60);
+  const s = ageSec % 60;
+  return `${m}m ${String(s).padStart(2, "0")}s old`;
+}
+
+function compForRunway(windFromDeg: number | null, windKt: number | null, rwyHeadingDeg: number) {
+  if (windFromDeg === null || windKt === null) {
+    return { hwLabel: "HW", hwVal: "—", xwSide: "", xwVal: "—" };
+  }
+
+  const delta = ((windFromDeg - rwyHeadingDeg) * Math.PI) / 180;
+  const hw = windKt * Math.cos(delta);
+  const xw = windKt * Math.sin(delta);
+
+  const hwLabel = hw >= 0 ? "HW" : "TW";
+  const hwVal = Math.abs(hw).toFixed(1);
+
+  const xwSide = xw >= 0 ? "R" : "L";
+  const xwVal = Math.abs(xw).toFixed(1);
+
+  return { hwLabel, hwVal, xwSide, xwVal };
+}
+
+/* ---------------- page ---------------- */
+
 export default function LivePage() {
-  const [wx, setWx] = useState<ThomasWx | null>(null);
-  const [status, setStatus] = useState<string>("Connecting…");
-  const [now, setNow] = useState<number>(() => Date.now());
+  const [wx, setWx] = useState<Wx | null>(null);
+  const [err, setErr] = useState<string | null>(null);
 
-  const staleSeconds = Number(process.env.NEXT_PUBLIC_STALE_SECONDS || "180");
-
+  // ticking clock so "age" counts up smoothly
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
 
+  // device heading
+  const [deviceHeading, setDeviceHeading] = useState<number | null>(null);
+  const [compassOn, setCompassOn] = useState(false);
+  const handlerRef = useRef<((e: DeviceOrientationEvent) => void) | null>(null);
+
+  const pollSeconds = Number(process.env.NEXT_PUBLIC_SSE_POLL_SECONDS || "8");
+
+  // Fetch the latest record from the API (which itself reads from Loki)
   useEffect(() => {
-    const es = new EventSource("/api/live");
+    let alive = true;
 
-    es.addEventListener("status", (e: MessageEvent) => {
+    async function load() {
       try {
-        const j = JSON.parse(e.data);
-        if (j?.connected) setStatus("Live");
-        else if (j?.found === false) setStatus("Waiting for data…");
-      } catch {
-        setStatus("Live");
+        const r = await fetch("/api/live", { cache: "no-store" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = (await r.json()) as Wx;
+        if (!alive) return;
+
+        setWx(j);
+        setErr(null);
+      } catch (e: any) {
+        if (!alive) return;
+        setErr(String(e?.message || e));
       }
-    });
+    }
 
-    es.addEventListener("wx", (e: MessageEvent) => {
-      const j = JSON.parse(e.data) as ThomasWx;
-      setWx(j);
-      setStatus("Live");
-    });
+    load();
+    const id = setInterval(load, Math.max(3, pollSeconds) * 1000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [pollSeconds]);
 
-    es.addEventListener("error", () => setStatus("Reconnecting…"));
+  // ✅ TRUE age = now - timestamp of last Wx record
+  const ageSec = useMemo(() => {
+    if (!wx || !isNum(wx.ts_unix_s)) return null;
+    const age = Math.floor(nowMs / 1000 - wx.ts_unix_s);
+    return Number.isFinite(age) ? Math.max(0, age) : null;
+  }, [wx, nowMs]);
 
-    return () => es.close();
-  }, []);
+  // Color thresholds you asked for
+  const warnYellowSeconds = 120; // 2 min
+  const warnRedSeconds = 300; // 5 min
 
-  const age = useMemo(() => (wx ? ageSeconds(wx, now) : NaN), [wx, now]);
-  const stale = useMemo(
-    () => (wx ? ageSeconds(wx, now) > staleSeconds : false),
-    [wx, now, staleSeconds]
-  );
+  const status = useMemo(() => {
+    if (ageSec === null) return { label: "—", cls: "text-neutral-400" };
+    if (ageSec >= warnRedSeconds) return { label: fmtAge(ageSec), cls: "text-rose-300" };
+    if (ageSec >= warnYellowSeconds) return { label: fmtAge(ageSec), cls: "text-amber-300" };
+    return { label: "UPDATED", cls: "text-emerald-300" };
+  }, [ageSec]);
 
-  const metar1 = wx ? metarLikeLine1(wx) : "Thomas_FLD ------Z ---__KT A----";
-  const metar2 = wx ? metarLikeLine2(wx) : "";
+  const dir = pickDirDeg(wx || undefined);
+  const spd = pickSpdKt(wx || undefined);
+  const gst = pickGustKt(wx || undefined);
 
-  // wind_dir_deg first (primary decision driver)
-  const windDir = wx ? pickWindDirDeg(wx) : null;
+  const comp09 = useMemo(() => compForRunway(dir, spd, 90), [dir, spd]);
+  const comp27 = useMemo(() => compForRunway(dir, spd, 270), [dir, spd]);
 
-  const windSpd = wx?.wind_speed_kt ?? null;
-  const windGust = wx?.wind_gust_kt ?? null;
-  const spread = wx?.wind_dir_spread_deg ?? null;
-  const variableFlag = wx?.wind_dir_variable ?? 0;
+  const rec = (wx?.rec_rwy || "").trim();
+  const advisoryText = (wx?.advisory || wx?.rec_reason || "").trim();
 
-  const isCalm =
-    typeof windSpd === "number" && isFinite(windSpd) && windSpd < CALM_KT;
+  const rowTone = (rwy: "09" | "27") => {
+    if (rec === "09" || rec === "27") {
+      return rec === rwy
+        ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100"
+        : "border-rose-400/30 bg-rose-400/10 text-rose-100";
+    }
+    return "border-neutral-800 bg-neutral-950/35 text-neutral-100";
+  };
+
+  // --- compass start/stop ---
+  async function startCompass() {
+    setCompassOn(true);
+
+    const anyDOE = DeviceOrientationEvent as any;
+    try {
+      if (anyDOE && typeof anyDOE.requestPermission === "function") {
+        const res = await anyDOE.requestPermission();
+        if (res !== "granted") {
+          setCompassOn(false);
+          setDeviceHeading(null);
+          alert("Motion/compass permission was not granted.");
+          return;
+        }
+      }
+    } catch {}
+
+    const handler: (e: DeviceOrientationEvent) => void = (e) => {
+      const anyE = e as any;
+      let hdg: number | null = null;
+
+      if (typeof anyE.webkitCompassHeading === "number") {
+        hdg = anyE.webkitCompassHeading;
+      } else if (typeof e.alpha === "number") {
+        hdg = e.alpha;
+      }
+
+      if (hdg === null || !Number.isFinite(hdg)) return;
+      setDeviceHeading(clamp360(hdg));
+    };
+
+    handlerRef.current = handler;
+
+    window.addEventListener("deviceorientationabsolute" as any, handler, true);
+    window.addEventListener("deviceorientation", handler, true);
+  }
+
+  function stopCompass() {
+    const handler = handlerRef.current;
+    if (handler) {
+      window.removeEventListener("deviceorientation", handler, true);
+      window.removeEventListener("deviceorientationabsolute" as any, handler, true);
+    }
+    handlerRef.current = null;
+    setCompassOn(false);
+    setDeviceHeading(null);
+  }
 
   return (
-    <main className="min-h-screen bg-neutral-950 text-neutral-100 p-5">
-      <div className="max-w-4xl mx-auto space-y-4">
+    <main className="min-h-screen bg-neutral-950 text-neutral-100">
+      <div className="max-w-3xl mx-auto px-4 py-6">
+        {/* Top bar */}
+        <div className="flex items-center justify-between gap-3">
+          <a href="/" className="text-sm font-semibold text-neutral-200 hover:text-neutral-100">
+            ← Thomas Field
+          </a>
+          <a href="/" className="text-xs text-neutral-400 hover:text-neutral-200">
+            Lots / Info
+          </a>
+        </div>
+
         {/* METAR-like strip */}
-        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/40 p-4">
-          <div className="flex items-center justify-between gap-3">
-            <div className="font-mono text-lg md:text-xl whitespace-pre-wrap leading-snug">
-              {metar1}
-              {metar2 ? "\n" + metar2 : ""}
-            </div>
+        <section className="mt-4 rounded-3xl border border-neutral-800 bg-neutral-900/25 overflow-hidden">
+          <div className="p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="font-mono text-[15px] leading-snug whitespace-pre-wrap">
+                {topLine(wx || undefined)}
+              </div>
 
-            <div className="text-right">
-              <div className="text-sm text-neutral-300">{status}</div>
-
-              {/* UPDATED status w/ WARNING */}
-              {(() => {
-                const ageSec = wx ? ageSeconds(wx, now) : NaN;
-                const warn5min = isFinite(ageSec) && ageSec >= WARNING_SECONDS;
-
-                const updatedText = wx ? `UPDATED ${fmtAge(ageSec)}` : "UPDATED —";
-
-                return (
-                  <div
-                    className={`text-sm font-semibold ${
-                      warn5min
-                        ? "text-red-400"
-                        : stale
-                        ? "text-amber-300"
-                        : "text-emerald-300"
-                    }`}
-                  >
-                    {warn5min ? (
-                      <span className="mr-2 font-extrabold text-red-500">
-                        WARNING
-                      </span>
-                    ) : null}
-                    {updatedText}
-                  </div>
-                );
-              })()}
-
-              {/* calm hint */}
-              <div className="mt-1 text-xs text-neutral-400">
-                {isCalm ? "CALM (<2 kt)" : ""}
+              <div className="text-right shrink-0">
+                <div className="text-xs text-neutral-400">Live</div>
+                <div className={`text-sm font-semibold ${status.cls}`}>{status.label}</div>
+                <div className="text-xs text-neutral-400">{fmtAge(ageSec)}</div>
               </div>
             </div>
+
+            {err && <div className="mt-3 text-xs text-rose-300">Error loading data: {err}</div>}
+
+            {advisoryText ? (
+              <div className="mt-4 rounded-2xl border border-amber-400/25 bg-amber-400/10 p-3">
+                <div className="text-xs font-semibold text-amber-200">Advisory</div>
+                <div className="mt-1 text-sm text-amber-100/90">{advisoryText}</div>
+              </div>
+            ) : null}
           </div>
         </section>
 
-        {/* Compass / Runway / Wind */}
-        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/30 p-4">
-          <div className="flex items-center justify-between gap-3 mb-3">
-            <div className="text-neutral-300 text-sm">Pilot Wind Graphic</div>
-            <div className="text-xs text-neutral-400">
-              Dir uses{" "}
-              <span className="text-neutral-200">wind_dir_deg</span> • Wedge uses{" "}
-              <span className="text-neutral-200">spread</span> /{" "}
-              <span className="text-neutral-200">variable</span>
-            </div>
-          </div>
+        {/* Wind + compass */}
+        <section className="mt-4 rounded-3xl border border-neutral-800 bg-neutral-900/25 overflow-hidden">
+          <div className="p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold">Pilot wind</div>
+                <div className="text-xs text-neutral-400 mt-1">
+                  Wind from {dir === null ? "—" : `${Math.round(dir)}°`} •{" "}
+                  {spd === null ? "—" : `${Math.round(spd)} kt`}
+                  {gst !== null ? ` (gust ${Math.round(gst)})` : ""}
+                </div>
+                <div className="text-xs text-neutral-400 mt-1">
+                  {spd !== null && spd < 2 && gst !== null && gst >= 2
+                    ? `Calm now — last gust ${Math.round(gst)} kt`
+                    : ""}
+                </div>
+              </div>
 
-          <div className="flex items-center justify-center">
-            <CompassRunwayWind
-              windDirDeg={windDir}
-              windSpeedKt={numRaw(windSpd)}
-              windGustKt={numRaw(windGust)}
-              windSpreadDeg={numRaw(spread)}
-              windDirVariable={variableFlag}
-              recRwy={wx?.rec_rwy ?? null}
-              rwyHeading09={90} // RWY 09/27
-            />
+              <button
+                onClick={() => (compassOn ? stopCompass() : startCompass())}
+                className="rounded-2xl border border-neutral-700 bg-neutral-950/40 px-3 py-2 text-xs font-semibold hover:bg-neutral-950/70"
+              >
+                {compassOn ? "Stop device compass" : "Use device compass"}
+              </button>
+            </div>
+
+            <div className="mt-4">
+              <WindCompass
+                windFromDeg={dir}
+                windKt={spd}
+                deviceHeadingDeg={deviceHeading}
+                showDeviceHeading={compassOn}
+              />
+            </div>
           </div>
         </section>
 
-        {/* Tiles */}
-        <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Card title="Recommended Runway">
-            <div className="text-5xl font-semibold tracking-wide">
-              {wx?.rec_rwy ? `RWY ${wx.rec_rwy}` : "—"}
+        {/* Runway */}
+        <section className="mt-4 rounded-3xl border border-neutral-800 bg-neutral-900/25 overflow-hidden">
+          <div className="p-4">
+            <div className="flex items-end justify-between">
+              <div>
+                <div className="text-sm font-semibold">Runway</div>
+                <div className="text-xs text-neutral-400 mt-1">
+                  Recommended: <span className="text-neutral-100 font-semibold">RWY {rec || "—"}</span>
+                </div>
+              </div>
+              <div className="text-xs text-neutral-400">Components in kt</div>
             </div>
-          </Card>
 
-          <Card title="Wind">
-            <div className="text-4xl font-semibold">
-              {num(wx?.wind_speed_kt, 1)}{" "}
-              <span className="text-base font-normal text-neutral-300">kt</span>
+            <div className="mt-4 grid grid-cols-1 gap-3">
+              <RunwayRow toneClass={rowTone("09")} label="RWY 09" {...comp09} />
+              <RunwayRow toneClass={rowTone("27")} label="RWY 27" {...comp27} />
             </div>
-            <div className="text-neutral-200 mt-1">
-              {isCalm ? (
-                <span className="font-semibold text-neutral-100">CALM</span>
-              ) : null}
-              {isCalm ? " • " : ""}
-              Gust: {num(wx?.wind_gust_kt, 1)} kt • Dir:{" "}
-              {windDir !== null ? `${Math.round(windDir)}°` : "—"} • Spread:{" "}
-              {wx?.wind_dir_spread_deg?.toFixed?.(1) ?? "—"}°
-            </div>
-          </Card>
-
-          <Card title="Runway Components (RWY 09)">
-            <div className="text-neutral-200">
-              <span className="text-neutral-400">REC:</span>{" "}
-              <span className="text-neutral-100 font-semibold">
-                {wx?.rec_rwy ?? "—"}
-              </span>{" "}
-              • <span className="text-neutral-400">XW:</span>{" "}
-              {signed(wx?.xw_09)} kt •{" "}
-              <span className="text-neutral-400">HW:</span> {signed(wx?.hw_09)} kt
-            </div>
-          </Card>
-
-          <Card title="Runway Components (RWY 27)">
-            <div className="text-neutral-200">
-              <span className="text-neutral-400">REC:</span>{" "}
-              <span className="text-neutral-100 font-semibold">
-                {wx?.rec_rwy ?? "—"}
-              </span>{" "}
-              • <span className="text-neutral-400">XW:</span>{" "}
-              {signed(wx?.xw_27)} kt •{" "}
-              <span className="text-neutral-400">HW:</span> {signed(wx?.hw_27)} kt
-            </div>
-          </Card>
-
-          <Card title="Altimeter">
-            <div className="text-4xl font-semibold">{num(wx?.altimeter_inhg, 2)}</div>
-            <div className="text-neutral-400 text-sm mt-1">inHg</div>
-          </Card>
-
-          <Card title="Density Altitude">
-            <div className="text-4xl font-semibold">
-              {wx?.da_ft ? Math.round(wx.da_ft) : "—"}
-            </div>
-            <div className="text-neutral-400 text-sm mt-1">ft</div>
-          </Card>
-
-          <Card title="Temp / Dewpoint / RH">
-            <div className="text-neutral-200">
-              {num(wx?.temp_f, 1)}°F / {num(wx?.dewpoint_f, 1)}°F • RH{" "}
-              {num(wx?.rh_pct, 0)}%
-            </div>
-          </Card>
-
-          <Card title="Cloud Base (derived)">
-            <div className="text-neutral-200">
-              {wx?.cloud_base_agl_ft
-                ? `${Math.round(wx.cloud_base_agl_ft)} AGL ft`
-                : "—"}
-            </div>
-          </Card>
-
-          <Card title="System Health">
-            <div className="text-neutral-200">
-              Uptime:{" "}
-              {wx?.uptime_ms ? `${Math.round(wx.uptime_ms / 1000)}s` : "—"} • RSSI:{" "}
-              {wx?.rssi ?? "—"} • IP: {wx?.ip ?? "—"}
-            </div>
-          </Card>
-
-          <Card title="Raw JSON (debug)">
-            <pre className="text-xs overflow-auto max-h-44 bg-neutral-950/60 p-3 rounded-xl border border-neutral-800">
-              {wx ? JSON.stringify(wx, null, 2) : "Waiting for wx…"}
-            </pre>
-          </Card>
+          </div>
         </section>
+
+        <div className="h-8" />
       </div>
     </main>
   );
 }
 
-function CompassRunwayWind(props: {
-  windDirDeg: number | null;
-  windSpeedKt: number | null;
-  windGustKt: number | null;
-  windSpreadDeg: number | null;
-  windDirVariable: number;
-  recRwy: string | null;
-  rwyHeading09: number; // degrees (09 = 90)
+/* ---------------- components ---------------- */
+
+function RunwayRow({
+  label,
+  toneClass,
+  hwLabel,
+  hwVal,
+  xwSide,
+  xwVal,
+}: {
+  label: string;
+  toneClass: string;
+  hwLabel: string;
+  hwVal: string;
+  xwSide: string;
+  xwVal: string;
 }) {
-  const size = 380;
-  const cx = size / 2;
-  const cy = size / 2;
-  const rOuter = 160;
-  const rInner = 130;
-
-  const dir = props.windDirDeg;
-  const spread = props.windSpreadDeg;
-
-  const isCalm =
-    props.windSpeedKt !== null && isFinite(props.windSpeedKt) && props.windSpeedKt < CALM_KT;
-
-  const rwyA = props.rwyHeading09; // 90
-  const rwyB = (rwyA + 180) % 360; // 270
-
-  const headA = `${String(Math.round(rwyA)).padStart(3, "0")}°`;
-  const headB = `${String(Math.round(rwyB)).padStart(3, "0")}°`;
-
-  const windLabel =
-    dir === null
-      ? "—"
-      : `${pad3(dir)}° ${isCalm ? "CALM" : `${fmtKt(props.windSpeedKt)}KT${
-          props.windGustKt !== null &&
-          props.windSpeedKt !== null &&
-          props.windGustKt >= props.windSpeedKt + 2
-            ? ` G${fmtKt(props.windGustKt)}`
-            : ""
-        }`}`;
-
-  // Wedge only when variable flag OR spread > threshold
-  const showWedge =
-    dir !== null &&
-    spread !== null &&
-    (props.windDirVariable === 1 || spread > WEDGE_SPREAD_MIN_DEG);
-
-  const wedgePath =
-    showWedge && dir !== null && spread !== null
-      ? arcWedgePath(cx, cy, rOuter - 6, rInner + 10, dir - spread / 2, dir + spread / 2)
-      : null;
-
-  // Always draw arrow when we have direction (faint if calm)
-  const arrow = dir !== null ? windArrow(cx, cy, rInner - 8, 120, dir) : null;
-
-  const isRec09 = props.recRwy === "09";
-  const isRec27 = props.recRwy === "27";
-
   return (
-    <div className="w-full max-w-md">
-      <div className="rounded-2xl border border-neutral-800 bg-neutral-950/40 p-4">
-        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-          {/* outer rings */}
-          <circle
-            cx={cx}
-            cy={cy}
-            r={rOuter}
-            fill="none"
-            stroke="rgba(255,255,255,0.18)"
-            strokeWidth="2"
-          />
-          <circle
-            cx={cx}
-            cy={cy}
-            r={rInner}
-            fill="none"
-            stroke="rgba(255,255,255,0.10)"
-            strokeWidth="1"
-          />
-
-          {/* ticks */}
-          {Array.from({ length: 36 }).map((_, i) => {
-            const a = i * 10;
-            const isCard = a % 90 === 0;
-            const isMajor = a % 30 === 0;
-            const len = isCard ? 16 : isMajor ? 10 : 6;
-            const p1 = polar(cx, cy, rOuter, a);
-            const p2 = polar(cx, cy, rOuter - len, a);
-            return (
-              <line
-                key={i}
-                x1={p1.x.toFixed(2)}
-                y1={p1.y.toFixed(2)}
-                x2={p2.x.toFixed(2)}
-                y2={p2.y.toFixed(2)}
-                stroke="rgba(255,255,255,0.22)"
-                strokeWidth={isCard ? 2 : 1}
-              />
-            );
-          })}
-
-          {/* cardinal labels */}
-          {[
-            { t: "N", a: 0 },
-            { t: "E", a: 90 },
-            { t: "S", a: 180 },
-            { t: "W", a: 270 },
-          ].map((c) => {
-            const p = polar(cx, cy, rOuter + 22, c.a);
-            return (
-              <text
-                key={c.t}
-                x={p.x.toFixed(2)}
-                y={p.y.toFixed(2)}
-                textAnchor="middle"
-                dominantBaseline="middle"
-                fontSize="16"
-                fill="rgba(255,255,255,0.70)"
-                fontFamily="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace"
-              >
-                {c.t}
-              </text>
-            );
-          })}
-
-          {/* runway line (09/27) */}
-          {(() => {
-            const pA = polar(cx, cy, rInner - 20, rwyA);
-            const pB = polar(cx, cy, rInner - 20, rwyB);
-            return (
-              <>
-                <line
-                  x1={pA.x.toFixed(2)}
-                  y1={pA.y.toFixed(2)}
-                  x2={pB.x.toFixed(2)}
-                  y2={pB.y.toFixed(2)}
-                  stroke="rgba(255,255,255,0.55)"
-                  strokeWidth="6"
-                  strokeLinecap="round"
-                />
-                <line
-                  x1={pA.x.toFixed(2)}
-                  y1={pA.y.toFixed(2)}
-                  x2={pB.x.toFixed(2)}
-                  y2={pB.y.toFixed(2)}
-                  stroke="rgba(0,0,0,0.30)"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                />
-              </>
-            );
-          })()}
-
-          {/* runway end labels (09 / 27) */}
-          {(() => {
-            const p09 = polar(cx, cy, rInner + 10, rwyA);
-            const p27 = polar(cx, cy, rInner + 10, rwyB);
-            return (
-              <>
-                <text
-                  x={p09.x.toFixed(2)}
-                  y={p09.y.toFixed(2)}
-                  textAnchor="middle"
-                  dominantBaseline="middle"
-                  fontSize="14"
-                  fill={isRec09 ? "rgba(110,231,183,0.95)" : "rgba(255,255,255,0.75)"}
-                  fontFamily="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace"
-                >
-                  09
-                </text>
-                <text
-                  x={p27.x.toFixed(2)}
-                  y={p27.y.toFixed(2)}
-                  textAnchor="middle"
-                  dominantBaseline="middle"
-                  fontSize="14"
-                  fill={isRec27 ? "rgba(110,231,183,0.95)" : "rgba(255,255,255,0.75)"}
-                  fontFamily="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace"
-                >
-                  27
-                </text>
-              </>
-            );
-          })()}
-
-          {/* runway heading markers (090°/270°) OUTSIDE ring to avoid “duplicate 09/27” look */}
-          {(() => {
-            const pA = polar(cx, cy, rOuter + 40, rwyA);
-            const pB = polar(cx, cy, rOuter + 40, rwyB);
-            return (
-              <>
-                <text
-                  x={pA.x.toFixed(2)}
-                  y={pA.y.toFixed(2)}
-                  textAnchor="middle"
-                  dominantBaseline="middle"
-                  fontSize="11"
-                  fill="rgba(255,255,255,0.55)"
-                  fontFamily="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace"
-                >
-                  {headA}
-                </text>
-                <text
-                  x={pB.x.toFixed(2)}
-                  y={pB.y.toFixed(2)}
-                  textAnchor="middle"
-                  dominantBaseline="middle"
-                  fontSize="11"
-                  fill="rgba(255,255,255,0.55)"
-                  fontFamily="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace"
-                >
-                  {headB}
-                </text>
-              </>
-            );
-          })()}
-
-          {/* variable wind wedge */}
-          {wedgePath ? (
-            <path
-              d={wedgePath}
-              fill="rgba(255,255,255,0.10)"
-              stroke="rgba(255,255,255,0.25)"
-              strokeWidth="1"
-            />
-          ) : null}
-
-          {/* wind arrow (faint if calm) */}
-          {arrow ? (
-            <>
-              <path
-                d={arrow.line}
-                stroke={isCalm ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.85)"}
-                strokeWidth={isCalm ? "2" : "3"}
-                strokeLinecap="round"
-                fill="none"
-              />
-              <path
-                d={arrow.head}
-                fill={isCalm ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.85)"}
-              />
-            </>
-          ) : null}
-
-          {/* center dot */}
-          <circle cx={cx} cy={cy} r={4} fill="rgba(255,255,255,0.8)" />
-        </svg>
-
-        <div className="mt-3 flex items-center justify-between gap-3">
-          <div className="font-mono text-sm text-neutral-200">{windLabel}</div>
-          <div className="text-xs text-neutral-400">
-            {props.windDirVariable === 1 ? (
-              <span className="text-neutral-100 font-semibold">VAR</span>
-            ) : spread !== null && spread > WEDGE_SPREAD_MIN_DEG ? (
-              `VAR ±${(spread / 2).toFixed(1)}°`
-            ) : (
-              "VAR —"
-            )}
-          </div>
+    <div className={`rounded-2xl border p-4 flex items-center justify-between ${toneClass}`}>
+      <div className="text-sm font-semibold">{label}</div>
+      <div className="flex items-center gap-4 text-sm">
+        <div>
+          <span className="opacity-70">{hwLabel}</span>{" "}
+          <span className="font-semibold">{hwVal}</span>
+        </div>
+        <div>
+          <span className="opacity-70">XW</span>{" "}
+          <span className="opacity-70">{xwSide}</span>{" "}
+          <span className="font-semibold">{xwVal}</span>
         </div>
       </div>
     </div>
   );
 }
 
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
+function WindCompass({
+  windFromDeg,
+  windKt,
+  deviceHeadingDeg,
+  showDeviceHeading,
+}: {
+  windFromDeg: number | null;
+  windKt: number | null;
+  deviceHeadingDeg: number | null;
+  showDeviceHeading: boolean;
+}) {
+  const roseRotate = showDeviceHeading && deviceHeadingDeg !== null ? -deviceHeadingDeg : 0;
+  const arrowDeg = windFromDeg !== null ? windFromDeg : 0;
+
+  function round3(n: number) {
+    return Math.round(n * 1000) / 1000;
+  }
+
+  function polar(deg: number, r: number) {
+    const rad = (deg * Math.PI) / 180;
+    return {
+      x: round3(50 + r * Math.sin(rad)),
+      y: round3(50 - r * Math.cos(rad)),
+    };
+  }
+
+  const tip = polar(arrowDeg, 34);
+  const base = polar(arrowDeg + 180, 10);
+
   return (
-    <div className="rounded-2xl border border-neutral-800 bg-neutral-900/30 p-4">
-      <div className="text-neutral-300 text-sm mb-2">{title}</div>
-      {children}
+    <div className="rounded-3xl border border-neutral-800 bg-neutral-950/30 p-4 w-full overflow-hidden">
+      <div className="mx-auto aspect-square w-full max-w-[420px]">
+        <svg viewBox="0 0 100 100" className="h-full w-full block">
+          <g transform={`rotate(${roseRotate} 50 50)`}>
+            <circle cx="50" cy="50" r="44" fill="none" stroke="rgba(255,255,255,0.16)" strokeWidth="1.2" />
+            <circle cx="50" cy="50" r="34" fill="none" stroke="rgba(255,255,255,0.10)" strokeWidth="1" />
+            <circle cx="50" cy="50" r="24" fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="1" />
+
+            {Array.from({ length: 36 }).map((_, i) => {
+              const deg = i * 10;
+              const a = polar(deg, 44);
+              const b = polar(deg, deg % 90 === 0 ? 40 : 42);
+              return (
+                <line
+                  key={i}
+                  x1={a.x}
+                  y1={a.y}
+                  x2={b.x}
+                  y2={b.y}
+                  stroke="rgba(255,255,255,0.14)"
+                  strokeWidth={deg % 90 === 0 ? 1.6 : 1}
+                  strokeLinecap="round"
+                />
+              );
+            })}
+
+            <text x="50" y="10.5" textAnchor="middle" fontSize="6" fill="rgba(255,255,255,0.65)" fontFamily="ui-sans-serif, system-ui">
+              N
+            </text>
+            <text x="89.5" y="52" textAnchor="middle" fontSize="6" fill="rgba(255,255,255,0.50)" fontFamily="ui-sans-serif, system-ui">
+              E
+            </text>
+            <text x="50" y="94" textAnchor="middle" fontSize="6" fill="rgba(255,255,255,0.50)" fontFamily="ui-sans-serif, system-ui">
+              S
+            </text>
+            <text x="10.5" y="52" textAnchor="middle" fontSize="6" fill="rgba(255,255,255,0.50)" fontFamily="ui-sans-serif, system-ui">
+              W
+            </text>
+
+            <text x="16" y="52" textAnchor="middle" fontSize="6" fill="rgba(34,197,94,0.85)" fontFamily="ui-sans-serif, system-ui">
+              27
+            </text>
+            <text x="84" y="52" textAnchor="middle" fontSize="6" fill="rgba(255,255,255,0.45)" fontFamily="ui-sans-serif, system-ui">
+              09
+            </text>
+            <line x1="18" y1="52" x2="82" y2="52" stroke="rgba(255,255,255,0.20)" strokeWidth="2.0" strokeLinecap="round" />
+            <circle cx="50" cy="50" r="1.8" fill="rgba(255,255,255,0.65)" />
+          </g>
+
+          <g>
+            <line x1={base.x} y1={base.y} x2={tip.x} y2={tip.y} stroke="rgba(255,255,255,0.75)" strokeWidth="1.8" strokeLinecap="round" />
+            {(() => {
+              const left = polar(arrowDeg + 160, 8);
+              const right = polar(arrowDeg + 200, 8);
+              return <path d={`M ${tip.x} ${tip.y} L ${left.x} ${left.y} L ${right.x} ${right.y} Z`} fill="rgba(255,255,255,0.75)" />;
+            })()}
+          </g>
+
+          <text x="50" y="78" textAnchor="middle" fontSize="6" fill="rgba(255,255,255,0.45)" fontFamily="ui-sans-serif, system-ui">
+            {windKt === null ? "— kt" : windKt < 2 ? "CALM" : `${Math.round(windKt)} kt`}
+          </text>
+        </svg>
+      </div>
     </div>
   );
 }
-
-function num(v: any, digits: number) {
-  const n = typeof v === "number" && isFinite(v) ? v : NaN;
-  return isFinite(n) ? n.toFixed(digits) : "—";
-}
-
-function numRaw(v: any): number | null {
-  const n = typeof v === "number" && isFinite(v) ? v : NaN;
-  return isFinite(n) ? n : null;
-}
-
-function signed(v: any) {
-  const n = typeof v === "number" && isFinite(v) ? v : NaN;
-  if (!isFinite(n)) return "—";
-  const s = n >= 0 ? "+" : "−";
-  return `${s}${Math.abs(n).toFixed(1)}`;
-}
-
-function pad3(n: number): string {
-  const x = Math.round(n) % 360;
-  return String(x).padStart(3, "0");
-}
-
-function fmtKt(v: number | null): string {
-  if (v === null) return "__";
-  return String(Math.round(v)).padStart(2, "0");
-}
-
-function polar(cx: number, cy: number, r: number, deg: number) {
-  const rad = ((deg - 90) * Math.PI) / 180; // 0 deg at north
-  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
-}
-
-function windArrow(
-  cx: number,
-  cy: number,
-  rStart: number,
-  len: number,
-  windFromDeg: number
-) {
-  // Arrow points FROM outer ring toward center along wind direction
-  const p1 = polar(cx, cy, rStart + len, windFromDeg);
-  const p2 = polar(cx, cy, rStart, windFromDeg);
-  const line = `M ${p1.x.toFixed(2)} ${p1.y.toFixed(2)} L ${p2.x.toFixed(
-    2
-  )} ${p2.y.toFixed(2)}`;
-
-  // Arrowhead near p2 (toward center)
-  const headSize = 10;
-  const left = polar(p2.x, p2.y, headSize, windFromDeg + 140);
-  const right = polar(p2.x, p2.y, headSize, windFromDeg - 140);
-  const head = `M ${p2.x.toFixed(2)} ${p2.y.toFixed(2)} L ${left.x.toFixed(
-    2
-  )} ${left.y.toFixed(2)} L ${right.x.toFixed(2)} ${right.y.toFixed(2)} Z`;
-
-  return { line, head };
-}
-
-function arcWedgePath(
-  cx: number,
-  cy: number,
-  rOuter: number,
-  rInner: number,
-  startDeg: number,
-  endDeg: number
-) {
-  // normalize sweep (keep it small)
-  let s = startDeg;
-  let e = endDeg;
-  while (e < s) e += 360;
-
-  const largeArc = e - s > 180 ? 1 : 0;
-
-  const p1 = polar(cx, cy, rOuter, s);
-  const p2 = polar(cx, cy, rOuter, e);
-  const p3 = polar(cx, cy, rInner, e);
-  const p4 = polar(cx, cy, rInner, s);
-
-  return [
-    `M ${p1.x.toFixed(2)} ${p1.y.toFixed(2)}`,
-    `A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`,
-    `L ${p3.x.toFixed(2)} ${p3.y.toFixed(2)}`,
-    `A ${rInner} ${rInner} 0 ${largeArc} 0 ${p4.x.toFixed(2)} ${p4.y.toFixed(2)}`,
-    "Z",
-  ].join(" ");
-}
-
-
-
-
 
