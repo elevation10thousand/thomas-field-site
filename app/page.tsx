@@ -1,5 +1,3 @@
-export const dynamic = "force-dynamic";
-
 // app/page.tsx
 export default function HomePage() {
   return (
