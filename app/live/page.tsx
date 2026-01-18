@@ -142,10 +142,10 @@ function cloudBaseGroup(wx?: Wx) {
 }
 
 function topLine(wx?: Wx) {
-  const station = "Thomas_FLD";
+  const station = "Thomas Field";
   const t = zulu(wx?.ts_unix_s);
+
   const w = windGroup(wx);
-  const cb = cloudBaseGroup(wx);
 
   const temp = fmt1(wx?.temp_f);
   const dp = fmt1(wx?.dewpoint_f);
@@ -153,10 +153,14 @@ function topLine(wx?: Wx) {
   const a = altGroupA(wx);
 
   const daN = num(wx?.da_ft);
-  const da = daN === null ? "—" : `${Math.round(daN)}ft`;
+  const da = daN === null ? "—" : `${Math.round(daN)}FT`;
 
-  return `${station} ${t} ${w}  ${cb}  TEMP ${temp}F  DP ${dp}F  ${a}  DA ${da}`;
+  const cbN = num(wx?.cloud_base_agl_ft);
+  const cb = cbN === null ? "—" : `${Math.round(cbN)}FT`;
+
+  return `${station} ${t} ${w} TEMP ${temp}F DEWPOINT ${dp}F ${a} DA ${da} (Est.CloudBase ${cb} AGL)`;
 }
+
 
 function compForRunway(windFromDeg: number | null, windKt: number | null, rwyHeadingDeg: number) {
   if (windFromDeg === null || windKt === null) {
@@ -808,8 +812,8 @@ function WindCompass({
         </div>
 
         {/* Bigger compass WITHOUT clipping */}
-        <div className="mx-auto aspect-square w-full max-w-[540px] pt-16 pb-16">
-          <svg viewBox="-12 -18 124 136" className="h-full w-full block" role="img" aria-label="Wind direction vs runway 09/27">
+        <div className="mx-auto aspect-square w-full max-w-[620px] pt-10 pb-10">
+          <svg viewBox="-6 -10 112 128" className="h-full w-full block" role="img" aria-label="Wind direction vs runway 09/27">
             {/* rings */}
             <circle cx="50" cy="50" r={R_OUT} fill="none" stroke="rgba(255,255,255,0.10)" strokeWidth="2.2" />
             <circle cx="50" cy="50" r="39" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="0.8" />
