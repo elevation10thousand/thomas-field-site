@@ -227,6 +227,10 @@ export default function LivePage() {
   // smoothing state (ref so we can update inside event handler safely)
   const smoothRef = useRef<number | null>(null);
   const lastEmitRef = useRef<number>(0);
+  // Vector-based smoothing (better than degree smoothing on Android)
+const smoothSinRef = useRef<number | null>(null);
+const smoothCosRef = useRef<number | null>(null);
+
 
   const pollSeconds = Number(
     (process.env.NEXT_PUBLIC_SSE_POLL_SECONDS as any) || (process.env.SSE_POLL_SECONDS as any) || "8"
@@ -371,8 +375,10 @@ export default function LivePage() {
 
   async function startCompass() {
     setCompassOn(true);
-    smoothRef.current = null;
-    lastEmitRef.current = 0;
+smoothRef.current = null;
+lastEmitRef.current = 0;
+smoothSinRef.current = null;
+smoothCosRef.current = null;
 
     const anyDOE = DeviceOrientationEvent as any;
     try {
@@ -389,51 +395,70 @@ export default function LivePage() {
       // ignore
     }
 
-    // ✅ CLEAN, BRACE-SAFE handler
-    const handler: (e: DeviceOrientationEvent) => void = (e) => {
-      const anyE = e as any;
+    // ✅ CLEAN, BRACE-SAFE handler (vector smoothing + less jitter)
+const handler: (e: DeviceOrientationEvent) => void = (e) => {
+  const anyE = e as any;
 
-      // Determine heading
-      let hdg: number | null = null;
+  let hdg: number | null = null;
 
-      // iOS Safari: true compass heading
-      if (typeof anyE.webkitCompassHeading === "number") {
-        hdg = anyE.webkitCompassHeading;
-      } else if (typeof e.alpha === "number") {
-        // Android / Chrome: alpha corrected for screen orientation
-        const screenAngle =
-          typeof window !== "undefined" &&
-          typeof (window.screen as any)?.orientation?.angle === "number"
-            ? (window.screen as any).orientation.angle
-            : (window as any).orientation || 0;
+  // iOS Safari: true heading (usually best / true north-ish)
+  if (typeof anyE.webkitCompassHeading === "number") {
+    hdg = anyE.webkitCompassHeading;
+  } else if (typeof e.alpha === "number") {
+    // Android / Chrome: alpha corrected for screen orientation
+    const screenAngle =
+      typeof window !== "undefined" &&
+      typeof (window.screen as any)?.orientation?.angle === "number"
+        ? (window.screen as any).orientation.angle
+        : (window as any).orientation || 0;
 
-        hdg = 360 - e.alpha + screenAngle;
-      }
+    // 🔧 Android fix: many devices report alpha mirrored.
+    // If "east shows as west", flip alpha.
+    const alphaDeg = 360 - e.alpha; // <-- flip fixes E/W swap on many Androids
+    hdg = alphaDeg + screenAngle;
+  }
 
-      if (hdg === null || !Number.isFinite(hdg)) return;
+  if (hdg === null || !Number.isFinite(hdg)) return;
 
-      const next = clamp360(hdg);
+  const next = clamp360(hdg);
 
-      // Throttle (~20 Hz)
-      const now = performance.now();
-      if (now - lastEmitRef.current < 50) return;
-      lastEmitRef.current = now;
+  // Throttle to ~12.5 Hz (even smoother on Android)
+  const now = performance.now();
+  if (now - lastEmitRef.current < 80) return;
+  lastEmitRef.current = now;
 
-      const prev = smoothRef.current;
+  // --- Vector smoothing (EMA on unit circle) ---
+  const alpha = 0.045; // smaller = smoother/slower; try 0.035–0.07
 
-      // Dead-band: ignore tiny jitter
-      if (prev !== null) {
-        let delta = Math.abs(next - prev);
-        if (delta > 180) delta = 360 - delta;
-        if (delta < 0.6) return;
-      }
+  const rad = (next * Math.PI) / 180;
+  const s = Math.sin(rad);
+  const c = Math.cos(rad);
 
-      // Smooth heading
-      const smoothed = prev === null ? next : smoothAngle(prev, next, 0.035);
-      smoothRef.current = smoothed;
+  if (smoothSinRef.current === null || smoothCosRef.current === null) {
+    smoothSinRef.current = s;
+    smoothCosRef.current = c;
+  } else {
+    smoothSinRef.current = smoothSinRef.current * (1 - alpha) + s * alpha;
+    smoothCosRef.current = smoothCosRef.current * (1 - alpha) + c * alpha;
+  }
 
-      setDeviceHeading(smoothed);
-    };
+  const smRad = Math.atan2(smoothSinRef.current, smoothCosRef.current);
+  let smDeg = (smRad * 180) / Math.PI;
+  smDeg = clamp360(smDeg);
+
+  // Dead-band: ignore tiny output wobble (post-smoothing)
+  const prev = smoothRef.current;
+  if (prev !== null) {
+    let delta = Math.abs(smDeg - prev);
+    if (delta > 180) delta = 360 - delta;
+    if (delta < 1.0) return; // increase if still twitchy (0.6–1.2)
+  }
+
+  smoothRef.current = smDeg;
+  setDeviceHeading(smDeg);
+};
+
+
 
     handlerRef.current = handler;
     window.addEventListener("deviceorientationabsolute" as any, handler, true);
@@ -448,8 +473,11 @@ export default function LivePage() {
     }
     handlerRef.current = null;
     setCompassOn(false);
-    setDeviceHeading(null);
-    smoothRef.current = null;
+setDeviceHeading(null);
+smoothRef.current = null;
+smoothSinRef.current = null;
+smoothCosRef.current = null;
+
   }
 
   // GPS text
@@ -870,7 +898,7 @@ function WindCompass({
             {showDeviceHeading ? (
               <g transform="translate(50 50)">
                 {/* Your outline points RIGHT; rotate 90 to point UP, then +180 because you asked. */}
-                <g transform="rotate(270) scale(90)">
+                <g transform="rotate(90) scale(90)">
                   <path
                     d={PLANE_OUTLINE_PATH}
                     fill="rgba(255,255,255,0.10)"
