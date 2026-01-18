@@ -972,7 +972,7 @@ function WindCompass({
             {showDeviceHeading ? (
               <g transform="translate(50 50)">
                 {/* Your outline points RIGHT; rotate 90 to point UP, then +180 as requested => 270 total */}
-                <g transform="rotate(270) scale(65)">
+                <g transform="rotate(90) scale(65)">
                   <path
                     d={PLANE_OUTLINE_PATH}
                     fill="rgba(255,255,255,0.10)"
