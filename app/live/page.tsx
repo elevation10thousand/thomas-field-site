@@ -45,7 +45,7 @@ type Wx = {
   advisory_ts_unix_s?: number | string | null;
   advisory_age_s?: number | string | null;
 
-  // ✅ advisory color from Sheets
+  // advisory color from Sheets
   advisory_color?: string | null;
 };
 
@@ -114,17 +114,13 @@ function altGroupA(wx?: Wx) {
  * Wind group with:
  * - CALM when <2 kt
  * - Gust shown as Gxx when not calm and gust meaningful
- * NOTE: Removed LGxx (last gust) per your request.
  */
 function windGroup(wx?: Wx) {
   const spd = pickSpdKt(wx);
   const gst = pickGustKt(wx);
   const dir = pickDirDeg(wx);
 
-  // CALM logic
-  if (spd !== null && spd < 2) {
-    return `CALM`;
-  }
+  if (spd !== null && spd < 2) return `CALM`;
 
   const dirStr = dir === null ? "///" : String(Math.round(dir)).padStart(3, "0");
   const spdStr = spd === null ? "__" : String(Math.round(spd)).padStart(2, "0");
@@ -145,7 +141,6 @@ function cloudBaseGroup(wx?: Wx) {
 }
 
 function topLine(wx?: Wx) {
-  // Order: fld, time, wind, cloud base, temp, dp, alt, da
   const station = "Thomas_FLD";
   const t = zulu(wx?.ts_unix_s);
   const w = windGroup(wx);
@@ -193,6 +188,19 @@ function fmtAge(ageSec: number) {
   return `${h}h ${mm}m old`;
 }
 
+/* ---- device heading smoothing (wrap-safe) ---- */
+
+function angDiffDeg(a: number, b: number) {
+  // smallest signed difference a-b in degrees (-180..180]
+  let d = ((a - b + 540) % 360) - 180;
+  return d;
+}
+
+function lerpAngleDeg(from: number, to: number, alpha: number) {
+  const d = angDiffDeg(to, from);
+  return clamp360(from + d * alpha);
+}
+
 /* ---------------- page ---------------- */
 
 export default function LivePage() {
@@ -205,9 +213,17 @@ export default function LivePage() {
     return () => clearInterval(id);
   }, []);
 
+  // raw vs smoothed device heading
+  const [deviceHeadingRaw, setDeviceHeadingRaw] = useState<number | null>(null);
   const [deviceHeading, setDeviceHeading] = useState<number | null>(null);
+
   const [compassOn, setCompassOn] = useState(false);
   const handlerRef = useRef<((e: DeviceOrientationEvent) => void) | null>(null);
+
+  // smoothing state
+  const smoothRef = useRef<number | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const lastRafMsRef = useRef<number>(0);
 
   const pollSeconds = Number(
     (process.env.NEXT_PUBLIC_SSE_POLL_SECONDS as any) || (process.env.SSE_POLL_SECONDS as any) || "8"
@@ -283,78 +299,103 @@ export default function LivePage() {
     return Math.max(0, Math.round(nowMs / 1000 - ts));
   }, [wx?.advisory_age_s, wx?.advisory_ts_unix_s, nowMs]);
 
-  // advisory text
-  const advisoryTextRaw = str(wx?.advisory).trim();
-  const advisoryText = advisoryTextRaw || str(wx?.rec_reason).trim();
+  /* ---------- Banner 1: FIELD/RWY advisory (Sheets only) ---------- */
+  const fieldAdvisory = str(wx?.advisory).trim();
 
   const fieldClosed =
-    !!advisoryTextRaw &&
-    /field\s*closed|rwy\s*closed|closed|no\s*landings|do\s*not\s*land|unusable/i.test(advisoryTextRaw);
+    !!fieldAdvisory &&
+    /field\s*closed|rwy\s*closed|closed|no\s*landings|do\s*not\s*land|unusable/i.test(fieldAdvisory);
 
   const hasOpsOverride =
-    (!!advisoryTextRaw && fieldClosed) ||
+    (!!fieldAdvisory && fieldClosed) ||
     (() => {
       const advTs = num(wx?.advisory_ts_unix_s);
       const wxTs = num(wx?.ts_unix_s);
-      return !!advisoryTextRaw && advTs !== null && wxTs !== null && advTs > wxTs;
+      return !!fieldAdvisory && advTs !== null && wxTs !== null && advTs > wxTs;
     })();
 
   const rec = fieldClosed ? "--" : (str(wx?.rec_rwy) || "—").toUpperCase();
   const recIs09 = rec === "09";
   const recIs27 = rec === "27";
 
-  // ─────────────────────────────────────────────
-  // Advisory color: Sheets overrides aging colors
-  // ─────────────────────────────────────────────
-  const sheetsColorRaw = str(wx?.advisory_color).trim().toLowerCase();
-  const sheetsColor =
-    sheetsColorRaw === "green"
+  const advisoryColorRaw = str(wx?.advisory_color).trim().toLowerCase();
+  const advisoryColor =
+    advisoryColorRaw === "green"
       ? "green"
-      : sheetsColorRaw === "amber" || sheetsColorRaw === "yellow"
+      : advisoryColorRaw === "amber" || advisoryColorRaw === "yellow"
       ? "amber"
-      : sheetsColorRaw === "red"
+      : advisoryColorRaw === "red"
       ? "red"
-      : sheetsColorRaw === "neutral" || sheetsColorRaw === "gray" || sheetsColorRaw === "grey"
+      : advisoryColorRaw === "neutral" || advisoryColorRaw === "gray" || advisoryColorRaw === "grey"
       ? "neutral"
-      : "";
+      : "neutral";
 
-  const hasSheetsColor = sheetsColor.length > 0;
-
-  // fallback to age-based only if Sheets didn’t provide a color
-  const advisoryIsFresh = advisoryAgeSec !== null && advisoryAgeSec < 120;
-  const advisoryIsOld = advisoryAgeSec !== null && advisoryAgeSec >= 120 && advisoryAgeSec < 300;
-  const advisoryIsStale = advisoryAgeSec !== null && advisoryAgeSec >= 300;
-
-  const advisoryBorder = hasSheetsColor
-    ? sheetsColor === "red"
+  const advisoryBorder =
+    advisoryColor === "red"
       ? "border-rose-500/45 bg-rose-500/12"
-      : sheetsColor === "amber"
+      : advisoryColor === "amber"
       ? "border-amber-500/45 bg-amber-500/12"
-      : sheetsColor === "green"
+      : advisoryColor === "green"
       ? "border-emerald-500/35 bg-emerald-500/12"
-      : "border-neutral-700 bg-neutral-950/20"
-    : advisoryIsStale
-    ? "border-rose-500/40 bg-rose-500/10"
-    : advisoryIsOld
-    ? "border-amber-500/35 bg-amber-500/10"
-    : "border-emerald-500/25 bg-emerald-500/10";
+      : "border-neutral-700 bg-neutral-950/20";
 
-  const advisoryTitleColor = hasSheetsColor
-    ? sheetsColor === "red"
+  const advisoryTitleColor =
+    advisoryColor === "red"
       ? "text-rose-200"
-      : sheetsColor === "amber"
+      : advisoryColor === "amber"
       ? "text-amber-200"
-      : sheetsColor === "green"
+      : advisoryColor === "green"
       ? "text-emerald-200"
-      : "text-neutral-200"
-    : advisoryIsStale
-    ? "text-rose-200"
-    : advisoryIsOld
-    ? "text-amber-200"
-    : "text-emerald-200";
+      : "text-neutral-200";
 
-  // pulse only if Sheets says amber/red and it's "fresh"
-  const advisoryPulse = hasSheetsColor && advisoryIsFresh && (sheetsColor === "amber" || sheetsColor === "red");
+  /* ---------- Banner 2: WIND/COMPONENTS advisory (computed) ---------- */
+  const recReason = str(wx?.rec_reason).trim();
+
+  const isStrongRec = rec === "09" || rec === "27";
+  const isVariable = (variableFlag !== null && variableFlag > 0) || (variabilityDeg !== null && variabilityDeg >= 60);
+  const hasWindData = spd !== null || dir !== null;
+
+  const showWindBanner = !!recReason && hasWindData && (isStrongRec || isVariable);
+  const windBannerSub =
+    isVariable && variabilityDeg !== null ? `Variable winds (${Math.round(variabilityDeg)}° spread)` : "";
+
+  /* ---------- Smooth the device compass heading ---------- */
+  useEffect(() => {
+    if (!compassOn) {
+      smoothRef.current = null;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+      setDeviceHeading(null);
+      setDeviceHeadingRaw(null);
+      return;
+    }
+
+    function tick(tsMs: number) {
+      const raw = deviceHeadingRaw;
+      if (raw !== null) {
+        // smoothing: ~0.6s time constant (feels "instrument-grade")
+        // alpha depends on frame time
+        const last = lastRafMsRef.current || tsMs;
+        const dt = Math.min(0.1, Math.max(0.0, (tsMs - last) / 1000)); // clamp dt
+        lastRafMsRef.current = tsMs;
+
+        const tau = 0.6; // seconds (bigger = smoother/slower)
+        const alpha = 1 - Math.exp(-dt / tau);
+
+        if (smoothRef.current === null) smoothRef.current = raw;
+        smoothRef.current = lerpAngleDeg(smoothRef.current, raw, alpha);
+        setDeviceHeading(smoothRef.current);
+      }
+
+      rafRef.current = requestAnimationFrame(tick);
+    }
+
+    rafRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    };
+  }, [compassOn, deviceHeadingRaw]);
 
   async function startCompass() {
     setCompassOn(true);
@@ -366,6 +407,7 @@ export default function LivePage() {
         if (res !== "granted") {
           setCompassOn(false);
           setDeviceHeading(null);
+          setDeviceHeadingRaw(null);
           alert("Motion/compass permission was not granted.");
           return;
         }
@@ -381,11 +423,12 @@ export default function LivePage() {
       if (typeof anyE.webkitCompassHeading === "number") {
         hdg = anyE.webkitCompassHeading;
       } else if (typeof e.alpha === "number") {
+        // NOTE: Some browsers provide alpha (0..360) but may not be true-north.
         hdg = e.alpha;
       }
 
       if (hdg === null || !Number.isFinite(hdg)) return;
-      setDeviceHeading(clamp360(hdg));
+      setDeviceHeadingRaw(clamp360(hdg));
     };
 
     handlerRef.current = handler;
@@ -400,11 +443,17 @@ export default function LivePage() {
       window.removeEventListener("deviceorientationabsolute" as any, handler, true);
     }
     handlerRef.current = null;
+
+    smoothRef.current = null;
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+
     setCompassOn(false);
     setDeviceHeading(null);
+    setDeviceHeadingRaw(null);
   }
 
-  // GPS text (simple, robust)
+  // GPS text
   const gpsFix = num(wx?.gps_fix);
   const gpsLat = num(wx?.gps_lat);
   const gpsLon = num(wx?.gps_lon);
@@ -454,18 +503,12 @@ export default function LivePage() {
 
             {err && <div className="mt-3 text-xs text-rose-300">Error loading data: {err}</div>}
 
-            {/* Advisory */}
-            {advisoryText ? (
-              <div
-                className={[
-                  "mt-4 rounded-2xl border p-3",
-                  advisoryBorder,
-                  advisoryPulse ? "animate-pulse" : "",
-                ].join(" ")}
-              >
+            {/* Banner 1: FIELD/RWY advisory (Sheets only) */}
+            {fieldAdvisory ? (
+              <div className={["mt-4 rounded-2xl border p-3", advisoryBorder].join(" ")}>
                 <div className="flex items-center justify-between gap-2">
                   <div className={`text-xs font-semibold ${advisoryTitleColor}`}>
-                    Advisory
+                    Field / RWY advisory
                     {hasOpsOverride ? (
                       <span className="ml-2 rounded-full border border-neutral-700 bg-neutral-950/40 px-2 py-0.5 text-[10px] font-extrabold text-neutral-200">
                         OPS OVERRIDE
@@ -478,7 +521,7 @@ export default function LivePage() {
                   </div>
                 </div>
 
-                <div className="mt-1 text-sm text-neutral-100/90">{advisoryText}</div>
+                <div className="mt-1 text-sm text-neutral-100/90">{fieldAdvisory}</div>
 
                 {fieldClosed ? (
                   <div className="mt-2 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2">
@@ -486,6 +529,18 @@ export default function LivePage() {
                     <div className="text-xs text-rose-100/90 mt-0.5">Runway recommendation locked to “--”.</div>
                   </div>
                 ) : null}
+              </div>
+            ) : null}
+
+            {/* Banner 2: Wind/components advisory (computed) */}
+            {showWindBanner ? (
+              <div className="mt-3 rounded-2xl border border-neutral-800 bg-neutral-950/25 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-semibold text-neutral-200">Wind / runway logic</div>
+                  <div className="text-[11px] text-neutral-400">{rec}</div>
+                </div>
+                <div className="mt-1 text-sm text-neutral-100/90">{recReason}</div>
+                {windBannerSub ? <div className="mt-1 text-xs text-neutral-400">{windBannerSub}</div> : null}
               </div>
             ) : null}
           </div>
@@ -519,7 +574,6 @@ export default function LivePage() {
                 recRwy={rec}
               />
 
-              {/* GPS line BELOW compass but still inside the card */}
               <div className="mt-3 rounded-2xl border border-neutral-800 bg-neutral-950/25 px-3 py-2">
                 <div className="text-[11px] tracking-wider uppercase text-neutral-400">GPS</div>
                 <div className="mt-0.5 text-sm text-neutral-100/90 font-mono">{gpsLine}</div>
@@ -607,9 +661,6 @@ function RunwayRow({
   );
 }
 
-/* ---------------- your WindCompass component stays exactly as you pasted ---------------- */
-/* Paste it unchanged below. */
-
 function WindCompass({
   windFromDeg,
   windKt,
@@ -684,7 +735,6 @@ function WindCompass({
   const rwy09Fill = rec === "09" ? "rgba(34,197,94,0.95)" : "rgba(255,255,255,0.92)";
   const rwy27Fill = rec === "27" ? "rgba(34,197,94,0.95)" : "rgba(255,255,255,0.92)";
 
-  // runway: square ends, darker transparent gray
   const rwy = { x: 20, y: 45.2, w: 60, h: 9.6, rx: 0 };
   const yC = rwy.y + rwy.h / 2;
 
@@ -692,14 +742,12 @@ function WindCompass({
   const needleOuter = "rgba(255,255,255,1)";
   const needleMid = "rgba(156,163,175,0.90)";
 
-  // instrument-grade geometry
   const R_OUT = 45.8;
-  const R_TICK_OUT = 48.2; // pushed outward more
-  const R_TICK_MAJOR_IN = 43.6; // smaller ticks (shorter)
+  const R_TICK_OUT = 48.2;
+  const R_TICK_MAJOR_IN = 43.6;
   const R_TICK_MINOR_IN = 45.1;
   const R_TICK_MICRO_IN = 46.2;
 
-  // cardinals: pushed out, equal distance from ring
   const CARD_PAD = 6.4;
   const N_Y = 50 - (R_OUT + CARD_PAD);
   const S_Y = 50 + (R_OUT + CARD_PAD);
@@ -709,7 +757,6 @@ function WindCompass({
   return (
     <div className="rounded-3xl border border-neutral-800 bg-neutral-950/35 p-4 w-full overflow-hidden">
       <div className="relative">
-        {/* 4 corner metrics */}
         <div className="pointer-events-none absolute left-0 top-0 text-left">
           <div className="text-[11px] tracking-wider uppercase text-neutral-400">Wind</div>
           <div className="text-3xl leading-none font-semibold text-neutral-100">{windLabel}</div>
@@ -730,17 +777,14 @@ function WindCompass({
           <div className="text-3xl leading-none font-semibold text-neutral-100">{hdgText}</div>
         </div>
 
-        {/* Taller box for breathing room */}
-        <div className="mx-auto aspect-square w-full max-w-[460px] pt-14 pb-14">
-          <svg viewBox="-6 -12 112 124" className="h-full w-full block" role="img" aria-label="Wind direction vs runway 09/27">
-            {/* rings */}
+        {/* ✅ Larger compass, but keep padding so N/S never clip */}
+        <div className="mx-auto aspect-square w-full max-w-[560px] pt-16 pb-16">
+          <svg viewBox="-6 -12 112 124" className="h-full w-full block" role="img" aria-label="Wind vs runway 09/27">
             <circle cx="50" cy="50" r={R_OUT} fill="none" stroke="rgba(255,255,255,0.10)" strokeWidth="2.2" />
             <circle cx="50" cy="50" r="39" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="0.8" />
             <circle cx="50" cy="50" r="31" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="0.8" />
 
-            {/* Rose rotates with device heading */}
             <g transform={`rotate(${roseRotate} 50 50)`}>
-              {/* ticks */}
               {Array.from({ length: 72 }).map((_, i) => {
                 const deg = i * 5;
                 const isMajor = deg % 30 === 0;
@@ -758,11 +802,19 @@ function WindCompass({
                 const sw = isMajor ? 0.95 : isMinor ? 0.62 : 0.44;
 
                 return (
-                  <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={stroke} strokeWidth={sw} strokeLinecap="butt" />
+                  <line
+                    key={i}
+                    x1={a.x}
+                    y1={a.y}
+                    x2={b.x}
+                    y2={b.y}
+                    stroke={stroke}
+                    strokeWidth={sw}
+                    strokeLinecap="butt"
+                  />
                 );
               })}
 
-              {/* runway */}
               <g>
                 <rect x={rwy.x} y={rwy.y} width={rwy.w} height={rwy.h} rx={rwy.rx} fill="rgba(55,65,80,0.55)" />
                 <rect
@@ -818,61 +870,30 @@ function WindCompass({
                 </text>
               </g>
 
-              {/* cardinals OUTSIDE the ring */}
               {textCardinal("N", 50, N_Y)}
               {textCardinal("E", E_X, 50)}
               {textCardinal("S", 50, S_Y)}
               {textCardinal("W", W_X, 50)}
             </g>
 
-            {/* needle rotates with wind direction */}
             <g transform={`rotate(${windDeg} 50 50)`}>
               <path
-                d="
-                  M 50 9
-                  L 52.1 28.3
-                  L 54.1 50
-                  L 54.1 59
-                  L 50 65
-                  L 45.9 59
-                  L 45.9 50
-                  L 47.9 28.3 Z
-                "
+                d="M 50 9 L 52.1 28.3 L 54.1 50 L 54.1 59 L 50 65 L 45.9 59 L 45.9 50 L 47.9 28.3 Z"
                 fill={needleFill}
                 stroke={needleOuter}
                 strokeWidth="1.05"
                 strokeLinejoin="round"
               />
-
               <path
-                d="
-                  M 50 10.2
-                  L 51.7 29.1
-                  L 53.3 50
-                  L 53.3 58.3
-                  L 50 63.8
-                  L 46.7 58.3
-                  L 46.7 50
-                  L 48.3 29.1 Z
-                "
+                d="M 50 10.2 L 51.7 29.1 L 53.3 50 L 53.3 58.3 L 50 63.8 L 46.7 58.3 L 46.7 50 L 48.3 29.1 Z"
                 fill="none"
                 stroke={needleMid}
                 strokeOpacity="0.9"
                 strokeWidth="0.7"
                 strokeLinejoin="round"
               />
-
               <path
-                d="
-                  M 50 11.6
-                  L 51.0 30.5
-                  L 52.3 50
-                  L 52.3 57.6
-                  L 50 62.6
-                  L 47.7 57.6
-                  L 47.7 50
-                  L 49.0 30.5 Z
-                "
+                d="M 50 11.6 L 51.0 30.5 L 52.3 50 L 52.3 57.6 L 50 62.6 L 47.7 57.6 L 47.7 50 L 49.0 30.5 Z"
                 fill="none"
                 stroke={needleOuter}
                 strokeWidth="0.35"
@@ -885,9 +906,17 @@ function WindCompass({
               <circle cx="50" cy="50" r="3.3" fill="rgba(255,255,255,0.10)" />
               <circle cx="50" cy="50" r="2.2" fill="#0b0f14" stroke="rgba(255,255,255,0.35)" strokeWidth="0.55" />
 
-              {/* direction bubble at tail */}
               <g>
-                <rect x={50 - 7.0} y={71.4} width={14.0} height={7.4} rx={2.4} fill="rgba(0,0,0,0.55)" stroke="rgba(255,255,255,0.18)" strokeWidth="0.5" />
+                <rect
+                  x={50 - 7.0}
+                  y={71.4}
+                  width={14.0}
+                  height={7.4}
+                  rx={2.4}
+                  fill="rgba(0,0,0,0.55)"
+                  stroke="rgba(255,255,255,0.18)"
+                  strokeWidth="0.5"
+                />
                 <text
                   x="50"
                   y={71.4 + 5.2}
@@ -907,6 +936,7 @@ function WindCompass({
     </div>
   );
 }
+
 
 
 
