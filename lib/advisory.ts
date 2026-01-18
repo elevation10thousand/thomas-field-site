@@ -3,7 +3,7 @@
 export type AdvisoryPayload = {
   advisory: string | null;
   advisory_ts_unix_s: number | null; // comes from updated_unix_s (preferred)
-  advisory_color: string | null;     // "red" | "amber" | "green" | "neutral" | null
+  advisory_color: string | null; // "red" | "amber" | "green" | "neutral" | null
 };
 
 function parseCsvLine(line: string): string[] {
@@ -47,8 +47,7 @@ function normVal(v: string): string {
 }
 
 function normColor(v: string): string | null {
-  // allow users to type "red." "green!" etc
-  const s = normVal(v).toLowerCase().replace(/\.+$/, "");
+  const s = normVal(v).toLowerCase();
   if (!s) return null;
   if (s === "red") return "red";
   if (s === "amber" || s === "yellow") return "amber";
@@ -113,13 +112,12 @@ function parseAdvisoryCsv(text: string): AdvisoryPayload {
 
     const advisory = normVal(String(advisoryIdx >= 0 ? row1[advisoryIdx] : (row1[0] ?? "")));
 
-    const tsRaw = normVal(String(tsIdx >= 0 ? row1[tsIdx] : ""));
-    const ts = Number(tsRaw);
+    const ts = Number(normVal(String(tsIdx >= 0 ? row1[tsIdx] : "")));
     const advisory_ts_unix_s = Number.isFinite(ts) && ts > 0 ? ts : null;
 
-    // ✅ FIXED LINE (no ?? weirdness, TS clean)
-    const colorRaw = normVal(String(colorIdx >= 0 ? (row1[colorIdx] ?? "") : ""));
-    const advisory_color = normColor(colorRaw);
+    // ✅ (No weird ?? chain) — TS-safe and simple
+    const rawColor = colorIdx >= 0 ? String(row1[colorIdx] ?? "") : "";
+    const advisory_color = normColor(rawColor);
 
     return {
       advisory: advisory.length ? advisory : null,
@@ -139,25 +137,28 @@ function parseAdvisoryCsv(text: string): AdvisoryPayload {
  * Choose newest updated_unix_s; if tie, prefer the one with longer advisory text.
  */
 export async function fetchAdvisoryFromPublishedCsv(): Promise<AdvisoryPayload> {
-  const url = process.env.TF_ADVISORY_URL;
-  if (!url) return { advisory: null, advisory_ts_unix_s: null, advisory_color: null };
+  const urlEnv = process.env.TF_ADVISORY_URL;
 
-  async function fetchOnce(extraCb: number) {
+  // ✅ Lock-in a definite string for TypeScript
+  if (!urlEnv) return { advisory: null, advisory_ts_unix_s: null, advisory_color: null };
+  const url = String(urlEnv);
+
+  async function fetchOnce(csvUrl: string, extraCb: number) {
     const cb = Math.floor(Date.now() / 5000) + extraCb;
-    const sep = url.includes("?") ? "&" : "?";
-    const res = await fetch(`${url}${sep}cb=${cb}`, { cache: "no-store" });
+    const sep = csvUrl.includes("?") ? "&" : "?";
+    const res = await fetch(`${csvUrl}${sep}cb=${cb}`, { cache: "no-store" });
     if (!res.ok) throw new Error(`Advisory fetch HTTP ${res.status}`);
     const txt = await res.text();
     return parseAdvisoryCsv(txt);
   }
 
   try {
-    const a = await fetchOnce(0);
+    const a = await fetchOnce(url, 0);
 
     // tiny delay + second fetch (often returns the "other" cached variant)
     await sleep(250);
 
-    const b = await fetchOnce(1);
+    const b = await fetchOnce(url, 1);
 
     const aTs = a.advisory_ts_unix_s ?? -1;
     const bTs = b.advisory_ts_unix_s ?? -1;
@@ -175,3 +176,4 @@ export async function fetchAdvisoryFromPublishedCsv(): Promise<AdvisoryPayload> 
     return { advisory: null, advisory_ts_unix_s: null, advisory_color: null };
   }
 }
+
