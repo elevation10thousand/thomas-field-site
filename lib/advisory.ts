@@ -137,27 +137,35 @@ function parseAdvisoryCsv(text: string): AdvisoryPayload {
  * Choose newest updated_unix_s; if tie, prefer the one with longer advisory text.
  */
 export async function fetchAdvisoryFromPublishedCsv(): Promise<AdvisoryPayload> {
-  const urlEnv = process.env.TF_ADVISORY_URL;
+  const urlEnv = process.env.ADVISORY_SHEET_CSV_URL || process.env.TF_ADVISORY_URL;
+
 
   // ✅ Lock-in a definite string for TypeScript
   if (!urlEnv) return { advisory: null, advisory_ts_unix_s: null, advisory_color: null };
   const url = String(urlEnv);
 
   async function fetchOnce(csvUrl: string, extraCb: number) {
-    const cb = Math.floor(Date.now() / 5000) + extraCb;
-    const sep = csvUrl.includes("?") ? "&" : "?";
-    const res = await fetch(`${csvUrl}${sep}cb=${cb}`, {
-      cache: "no-store",
-      next: { revalidate: 0 },
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "text/csv,text/plain,*/*",
-      },
-    });
-    if (!res.ok) throw new Error(`Advisory fetch HTTP ${res.status}`);
-    const txt = await res.text();
-    return parseAdvisoryCsv(txt);
+  const cb = Math.floor(Date.now() / 5000) + extraCb;
+  const sep = csvUrl.includes("?") ? "&" : "?";
+
+  const res = await fetch(`${csvUrl}${sep}cb=${cb}`, {
+    cache: "no-store",
+    next: { revalidate: 0 },
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      "Accept": "text/csv,text/plain,*/*",
+    },
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Advisory fetch HTTP ${res.status}: ${body.slice(0, 120)}`);
   }
+
+  const txt = await res.text();
+  return parseAdvisoryCsv(txt);
+}
+
 
   try {
     const a = await fetchOnce(url, 0);
