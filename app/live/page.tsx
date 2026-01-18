@@ -389,38 +389,47 @@ export default function LivePage() {
       // ignore
     }
 
+    // ✅ CLEAN, BRACE-SAFE handler
     const handler: (e: DeviceOrientationEvent) => void = (e) => {
       const anyE = e as any;
 
-      // iOS Safari uses webkitCompassHeading (0 = North)
+      // Determine heading
       let hdg: number | null = null;
 
-// iOS Safari: true heading
-if (typeof anyE.webkitCompassHeading === "number") {
-  hdg = anyE.webkitCompassHeading;
-} else if (typeof e.alpha === "number") {
-  // Android/others: alpha may be relative; try to correct for screen orientation.
-  // (This helps when the user rotates the phone / landscape vs portrait.)
-  const screenAngle =
-    typeof window !== "undefined" && typeof (window.screen as any)?.orientation?.angle === "number"
-      ? (window.screen as any).orientation.angle
-      : (window as any).orientation || 0;
+      // iOS Safari: true compass heading
+      if (typeof anyE.webkitCompassHeading === "number") {
+        hdg = anyE.webkitCompassHeading;
+      } else if (typeof e.alpha === "number") {
+        // Android / Chrome: alpha corrected for screen orientation
+        const screenAngle =
+          typeof window !== "undefined" &&
+          typeof (window.screen as any)?.orientation?.angle === "number"
+            ? (window.screen as any).orientation.angle
+            : (window as any).orientation || 0;
 
-  hdg = e.alpha + screenAngle;
-}
-
+        hdg = e.alpha + screenAngle;
+      }
 
       if (hdg === null || !Number.isFinite(hdg)) return;
+
       const next = clamp360(hdg);
 
-      // emit max ~20 fps so React isn't slammed
+      // Throttle (~20 Hz)
       const now = performance.now();
       if (now - lastEmitRef.current < 50) return;
       lastEmitRef.current = now;
 
-      // smoothing (lower alpha = smoother)
       const prev = smoothRef.current;
-      const smoothed = prev === null ? next : smoothAngle(prev, next, 0.055);
+
+      // Dead-band: ignore tiny jitter
+      if (prev !== null) {
+        let delta = Math.abs(next - prev);
+        if (delta > 180) delta = 360 - delta;
+        if (delta < 0.6) return;
+      }
+
+      // Smooth heading
+      const smoothed = prev === null ? next : smoothAngle(prev, next, 0.035);
       smoothRef.current = smoothed;
 
       setDeviceHeading(smoothed);
@@ -662,10 +671,6 @@ function WindCompass({
   showDeviceHeading: boolean;
   recRwy: string;
 }) {
-  // Device compass mode:
-  // - Compass rose spins with device heading (heading-up)
-  // - Airplane stays fixed pointing up on screen
-  // - Wind needle rotates relative to device heading
   const hasHdg = showDeviceHeading && deviceHeadingDeg !== null;
 
   // Rose rotates opposite device heading (heading-up)
@@ -864,12 +869,12 @@ function WindCompass({
             {/* Airplane icon — ONLY when device compass is ON (behind needle) */}
             {showDeviceHeading ? (
               <g transform="translate(50 50)">
-                {/* Path points to the RIGHT originally; rotate -90 so nose points UP */}
-                <g transform="rotate(90) scale(75)">
+                {/* Your outline points RIGHT; rotate 90 to point UP, then +180 because you asked. */}
+                <g transform="rotate(270) scale(90)">
                   <path
                     d={PLANE_OUTLINE_PATH}
                     fill="rgba(255,255,255,0.10)"
-                    stroke="rgba(255,255,255,0.38)"
+                    stroke="rgba(255,255,255,0.40)"
                     strokeWidth={0.03}
                     strokeLinejoin="round"
                   />
@@ -951,7 +956,7 @@ function WindCompass({
 
 /**
  * Airplane outline path extracted from your provided icon.
- * Original points appear to face RIGHT; we rotate -90 to point UP.
+ * Original points appear to face RIGHT; we rotate it in the SVG.
  */
 const PLANE_OUTLINE_PATH =
   "M -0.19 -0.54 L -0.2 -0.49 L -0.22 -0.06 L -0.37 -0.05 L -0.39 -0.01 L -0.44 0 L -0.39 0.02 L -0.37 0.05 L -0.21 0.06 L -0.21 0.3 L -0.19 0.52 L -0.17 0.54 L -0.11 0.54 L -0.05 0.29 L -0.06 0.07 L -0.05 0.05 L 0.24 0.01 L 0.26 0.03 L 0.27 0.18 L 0.36 0.19 L 0.37 0.05 L 0.35 0.02 L 0.36 0.01 L 0.48 -0.01 L 0.35 -0.02 L 0.37 -0.05 L 0.36 -0.2 L 0.27 -0.19 L 0.26 -0.04 L 0.24 -0.02 L -0.05 -0.06 L -0.06 -0.3 L -0.11 -0.54 Z";
