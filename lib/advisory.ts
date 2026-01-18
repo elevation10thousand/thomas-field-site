@@ -47,7 +47,8 @@ function normVal(v: string): string {
 }
 
 function normColor(v: string): string | null {
-  const s = normVal(v).toLowerCase();
+  // allow users to type "red." "green!" etc
+  const s = normVal(v).toLowerCase().replace(/\.+$/, "");
   if (!s) return null;
   if (s === "red") return "red";
   if (s === "amber" || s === "yellow") return "amber";
@@ -110,11 +111,15 @@ function parseAdvisoryCsv(text: string): AdvisoryPayload {
     const tsIdx = header.indexOf("updated_unix_s");
     const colorIdx = header.indexOf("advisory_color");
 
-    const advisory = normVal(String(advisoryIdx >= 0 ? row1[advisoryIdx] : row1[0] ?? ""));
-    const ts = Number(normVal(String(tsIdx >= 0 ? row1[tsIdx] : "")));
+    const advisory = normVal(String(advisoryIdx >= 0 ? row1[advisoryIdx] : (row1[0] ?? "")));
+
+    const tsRaw = normVal(String(tsIdx >= 0 ? row1[tsIdx] : ""));
+    const ts = Number(tsRaw);
     const advisory_ts_unix_s = Number.isFinite(ts) && ts > 0 ? ts : null;
 
-    const advisory_color = normColor(String(colorIdx >= 0 ? row1[colorIdx] : "" ?? ""));
+    // ✅ FIXED LINE (no ?? weirdness, TS clean)
+    const colorRaw = normVal(String(colorIdx >= 0 ? (row1[colorIdx] ?? "") : ""));
+    const advisory_color = normColor(colorRaw);
 
     return {
       advisory: advisory.length ? advisory : null,
