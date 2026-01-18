@@ -189,12 +189,12 @@ function fmtAge(ageSec: number) {
   return `${h}h ${mm}m old`;
 }
 
-// Smooth angle (wrap-aware). alpha ~0.10–0.25 (lower = smoother)
-function smoothAngleDeg(prev: number, next: number, alpha: number) {
-  // shortest signed diff in [-180, 180)
-  let diff = ((next - prev + 540) % 360) - 180;
-  const out = prev + diff * alpha;
-  return clamp360(out);
+// Smooth angle (wrap-aware). Lower alpha = smoother
+function smoothAngle(prev: number, next: number, alpha = 0.055) {
+  let d = next - prev;
+  if (d > 180) d -= 360;
+  if (d < -180) d += 360;
+  return clamp360(prev + alpha * d);
 }
 
 /* ---------------- page ---------------- */
@@ -202,6 +202,17 @@ function smoothAngleDeg(prev: number, next: number, alpha: number) {
 export default function LivePage() {
   const [wx, setWx] = useState<Wx | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  // Sticky advisory (prevents flipping old/new)
+  const [stickyAdv, setStickyAdv] = useState<{
+    advisory: string | null;
+    advisory_color: string | null;
+    advisory_ts_unix_s: number | null;
+  }>({
+    advisory: null,
+    advisory_color: null,
+    advisory_ts_unix_s: null,
+  });
 
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   useEffect(() => {
@@ -233,8 +244,22 @@ export default function LivePage() {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const j = (await r.json()) as Wx;
         if (!alive) return;
+
         setWx(j);
         setErr(null);
+
+        // Sticky advisory: accept only if timestamp moves forward
+        setStickyAdv((cur) => {
+          const ts = num(j.advisory_ts_unix_s);
+          const text = typeof j.advisory === "string" ? j.advisory.trim() : "";
+          const color = typeof j.advisory_color === "string" ? j.advisory_color.trim() : null;
+
+          if (!ts || !text) return cur;
+          if (!cur.advisory_ts_unix_s || ts > cur.advisory_ts_unix_s) {
+            return { advisory: text, advisory_color: color, advisory_ts_unix_s: ts };
+          }
+          return cur;
+        });
       } catch (e: any) {
         if (!alive) return;
         setErr(String(e?.message || e));
@@ -286,13 +311,15 @@ export default function LivePage() {
   const advisoryAgeSec = useMemo(() => {
     const a = num(wx?.advisory_age_s);
     if (a !== null) return Math.max(0, Math.round(a));
-    const ts = num(wx?.advisory_ts_unix_s);
-    if (ts === null) return null;
-    return Math.max(0, Math.round(nowMs / 1000 - ts));
-  }, [wx?.advisory_age_s, wx?.advisory_ts_unix_s, nowMs]);
 
-  // advisory text
-  const advisoryTextRaw = str(wx?.advisory).trim();
+    const ts = stickyAdv.advisory_ts_unix_s ?? num(wx?.advisory_ts_unix_s);
+    if (ts === null) return null;
+
+    return Math.max(0, Math.round(nowMs / 1000 - ts));
+  }, [wx?.advisory_age_s, wx?.advisory_ts_unix_s, stickyAdv.advisory_ts_unix_s, nowMs]);
+
+  // Use sticky advisory first; fall back to wx if sticky is empty
+  const advisoryTextRaw = (stickyAdv.advisory ?? str(wx?.advisory)).trim();
   const advisoryText = advisoryTextRaw || "";
 
   const fieldClosed =
@@ -302,7 +329,7 @@ export default function LivePage() {
   const hasOpsOverride =
     (!!advisoryTextRaw && fieldClosed) ||
     (() => {
-      const advTs = num(wx?.advisory_ts_unix_s);
+      const advTs = stickyAdv.advisory_ts_unix_s ?? num(wx?.advisory_ts_unix_s);
       const wxTs = num(wx?.ts_unix_s);
       return !!advisoryTextRaw && advTs !== null && wxTs !== null && advTs > wxTs;
     })();
@@ -311,8 +338,8 @@ export default function LivePage() {
   const recIs09 = rec === "09";
   const recIs27 = rec === "27";
 
-  // advisory color ONLY from Sheets
-  const advisoryColorRaw = str(wx?.advisory_color).trim().toLowerCase();
+  // advisory color ONLY from Sheets (sticky first)
+  const advisoryColorRaw = (stickyAdv.advisory_color ?? str(wx?.advisory_color)).trim().toLowerCase();
   const advisoryColor =
     advisoryColorRaw === "red"
       ? "red"
@@ -345,6 +372,7 @@ export default function LivePage() {
   async function startCompass() {
     setCompassOn(true);
     smoothRef.current = null;
+    lastEmitRef.current = 0;
 
     const anyDOE = DeviceOrientationEvent as any;
     try {
@@ -376,16 +404,15 @@ export default function LivePage() {
       if (hdg === null || !Number.isFinite(hdg)) return;
       const next = clamp360(hdg);
 
-      // ---- smoothing + throttling (reduces jitter) ----
-      const alpha = 0.14; // smaller = smoother/slower
-      const prev = smoothRef.current;
-      const smoothed = prev === null ? next : smoothAngleDeg(prev, next, alpha);
-      smoothRef.current = smoothed;
-
       // emit max ~20 fps so React isn't slammed
       const now = performance.now();
       if (now - lastEmitRef.current < 50) return;
       lastEmitRef.current = now;
+
+      // smoothing (lower alpha = smoother)
+      const prev = smoothRef.current;
+      const smoothed = prev === null ? next : smoothAngle(prev, next, 0.055);
+      smoothRef.current = smoothed;
 
       setDeviceHeading(smoothed);
     };
@@ -630,11 +657,14 @@ function WindCompass({
   // - Compass rose spins with device heading (heading-up)
   // - Airplane stays fixed pointing up on screen
   // - Wind needle rotates relative to device heading
-  const hdg = showDeviceHeading && deviceHeadingDeg !== null ? deviceHeadingDeg : 0;
-  const roseRotate = showDeviceHeading && deviceHeadingDeg !== null ? -deviceHeadingDeg : 0;
+  const hasHdg = showDeviceHeading && deviceHeadingDeg !== null;
 
-  const windDegAbs = windFromDeg !== null ? windFromDeg : 0;
-  const needleRotate = showDeviceHeading && deviceHeadingDeg !== null ? clamp360(windDegAbs - hdg) : windDegAbs;
+  // Rose rotates opposite device heading (heading-up)
+  const roseRotate = hasHdg ? -deviceHeadingDeg! : 0;
+
+  // Needle is relative to device heading when enabled
+  const windDegAbs = windFromDeg ?? 0;
+  const needleRotate = hasHdg ? clamp360(windDegAbs - deviceHeadingDeg!) : windDegAbs;
 
   function round3(n: number) {
     return Math.round(n * 1000) / 1000;
@@ -679,7 +709,11 @@ function WindCompass({
       ? `${Math.round(variabilityDeg)}°`
       : "—";
 
-  const hdgText = showDeviceHeading ? (deviceHeadingDeg !== null ? `${String(Math.round(deviceHeadingDeg)).padStart(3, "0")}°` : "…") : "—";
+  const hdgText = showDeviceHeading
+    ? deviceHeadingDeg !== null
+      ? `${String(Math.round(deviceHeadingDeg)).padStart(3, "0")}°`
+      : "…"
+    : "—";
 
   const rec = (recRwy || "").toUpperCase();
   const rwy09Fill = rec === "09" ? "rgba(34,197,94,0.95)" : "rgba(255,255,255,0.92)";
@@ -731,7 +765,7 @@ function WindCompass({
           <div className="text-3xl leading-none font-semibold text-neutral-100">{hdgText}</div>
         </div>
 
-        {/* Bigger compass WITHOUT clipping (more padding + bigger max width) */}
+        {/* Bigger compass WITHOUT clipping */}
         <div className="mx-auto aspect-square w-full max-w-[540px] pt-16 pb-16">
           <svg viewBox="-12 -18 124 136" className="h-full w-full block" role="img" aria-label="Wind direction vs runway 09/27">
             {/* rings */}
@@ -741,7 +775,7 @@ function WindCompass({
 
             {/* Rose rotates with device heading (heading-up) */}
             <g transform={`rotate(${roseRotate} 50 50)`}>
-              {/* ticks: square ends; every 30° whiter */}
+              {/* ticks */}
               {Array.from({ length: 72 }).map((_, i) => {
                 const deg = i * 5;
                 const isMajor = deg % 30 === 0;
@@ -779,7 +813,7 @@ function WindCompass({
                   strokeDasharray="1.6 2.6"
                 />
 
-                {/* runway numbers (sleek, smaller, centered) */}
+                {/* runway numbers */}
                 <text
                   x={rwy.x + 6.5}
                   y={yC}
@@ -811,30 +845,28 @@ function WindCompass({
                 </text>
               </g>
 
-                            {/* cardinals OUTSIDE the ring */}
+              {/* cardinals OUTSIDE the ring */}
               {textCardinal("N", 50, N_Y)}
               {textCardinal("E", E_X, 50)}
               {textCardinal("S", 50, S_Y)}
               {textCardinal("W", W_X, 50)}
             </g>
 
-            {/* Airplane icon — ONLY when device compass is ON (DRAWN BEHIND NEEDLE) */}
-{showDeviceHeading ? (
-  <g transform="translate(50 50)">
-    {/* rotate the icon so the nose points UP on screen */}
-    <g transform="rotate(90) scale(75)">
-      <path
-        d={PLANE_OUTLINE_PATH}
-        fill="rgba(255,255,255,0.18)"
-        stroke="rgba(255,255,255,0.55)"
-        strokeWidth={0.03}
-        strokeLinejoin="round"
-      />
-    </g>
-  </g>
-) : null}
-
-
+            {/* Airplane icon — ONLY when device compass is ON (behind needle) */}
+            {showDeviceHeading ? (
+              <g transform="translate(50 50)">
+                {/* Path points to the RIGHT originally; rotate -90 so nose points UP */}
+                <g transform="rotate(-90) scale(18)">
+                  <path
+                    d={PLANE_OUTLINE_PATH}
+                    fill="rgba(255,255,255,0.10)"
+                    stroke="rgba(255,255,255,0.38)"
+                    strokeWidth={0.03}
+                    strokeLinejoin="round"
+                  />
+                </g>
+              </g>
+            ) : null}
 
             {/* Wind needle — ALWAYS visible */}
             <g transform={`rotate(${needleRotate} 50 50)`}>
@@ -856,17 +888,16 @@ function WindCompass({
               />
 
               <path
-  d="
-    M 50 9
-    L 51.4 28.3
-    L 52.6 50
-    L 52.6 59
-    L 50 64
-    L 47.4 59
-    L 47.4 50
-    L 48.6 28.3 Z
-  "
-
+                d="
+                  M 50 9
+                  L 51.4 28.3
+                  L 52.6 50
+                  L 52.6 59
+                  L 50 64
+                  L 47.4 59
+                  L 47.4 50
+                  L 48.6 28.3 Z
+                "
                 fill="none"
                 stroke={needleMid}
                 strokeOpacity="0.9"
@@ -875,14 +906,7 @@ function WindCompass({
               />
 
               <circle cx="50" cy="50" r="3.3" fill="rgba(255,255,255,0.10)" />
-              <circle
-                cx="50"
-                cy="50"
-                r="2.2"
-                fill="#0b0f14"
-                stroke="rgba(255,255,255,0.35)"
-                strokeWidth="0.55"
-              />
+              <circle cx="50" cy="50" r="2.2" fill="#0b0f14" stroke="rgba(255,255,255,0.35)" strokeWidth="0.55" />
 
               {/* direction bubble at tail */}
               <g>
@@ -909,9 +933,6 @@ function WindCompass({
                 </text>
               </g>
             </g>
-
-
-            
           </svg>
         </div>
       </div>
@@ -921,6 +942,7 @@ function WindCompass({
 
 /**
  * Airplane outline path extracted from your provided icon.
- * Centered about (0,0). We rotate/scale in the SVG transform.
+ * Original points appear to face RIGHT; we rotate -90 to point UP.
  */
-const PLANE_OUTLINE_PATH = "M -0.19 -0.54 L -0.2 -0.49 L -0.22 -0.06 L -0.37 -0.05 L -0.39 -0.01 L -0.44 0 L -0.39 0.02 L -0.37 0.05 L -0.21 0.06 L -0.21 0.3 L -0.19 0.52 L -0.17 0.54 L -0.11 0.54 L -0.05 0.29 L -0.06 0.07 L -0.05 0.05 L 0.24 0.01 L 0.26 0.03 L 0.27 0.18 L 0.36 0.19 L 0.37 0.05 L 0.35 0.02 L 0.36 0.01 L 0.48 -0.01 L 0.35 -0.02 L 0.37 -0.05 L 0.36 -0.2 L 0.27 -0.19 L 0.26 -0.04 L 0.24 -0.02 L -0.05 -0.06 L -0.06 -0.3 L -0.11 -0.54 Z";
+const PLANE_OUTLINE_PATH =
+  "M -0.19 -0.54 L -0.2 -0.49 L -0.22 -0.06 L -0.37 -0.05 L -0.39 -0.01 L -0.44 0 L -0.39 0.02 L -0.37 0.05 L -0.21 0.06 L -0.21 0.3 L -0.19 0.52 L -0.17 0.54 L -0.11 0.54 L -0.05 0.29 L -0.06 0.07 L -0.05 0.05 L 0.24 0.01 L 0.26 0.03 L 0.27 0.18 L 0.36 0.19 L 0.37 0.05 L 0.35 0.02 L 0.36 0.01 L 0.48 -0.01 L 0.35 -0.02 L 0.37 -0.05 L 0.36 -0.2 L 0.27 -0.19 L 0.26 -0.04 L 0.24 -0.02 L -0.05 -0.06 L -0.06 -0.3 L -0.11 -0.54 Z";
