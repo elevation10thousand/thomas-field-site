@@ -819,17 +819,21 @@ function WindCompass({
             </g>
 
             {/* Airplane icon — ONLY when device compass is ON (DRAWN BEHIND NEEDLE) */}
-            {showDeviceHeading ? (
-              <g transform="translate(50 50)">
-                {/* exact outline, smaller, no glow */}
-                <g transform="scale(0.14)">
-                  <path
-                    d={PLANE_OUTLINE_PATH}
-                    fill="rgba(255,255,255,0.90)"
-                  />
-                </g>
-              </g>
-            ) : null}
+{showDeviceHeading ? (
+  <g transform="translate(50 50)">
+    {/* NOTE: outline path is ~1 unit tall, so it needs a BIG scale */}
+    <g transform="scale(45)">
+      <path
+        d={PLANE_OUTLINE_PATH}
+        fill="rgba(255,255,255,0.18)"   // subtle so needle stays dominant
+        stroke="rgba(255,255,255,0.55)" // outline makes it readable
+        strokeWidth={0.03}              // small because we're scaled up
+        strokeLinejoin="round"
+      />
+    </g>
+  </g>
+) : null}
+
 
             {/* Wind needle — ALWAYS visible */}
             <g transform={`rotate(${needleRotate} 50 50)`}>
