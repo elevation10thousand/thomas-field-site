@@ -705,7 +705,7 @@ function WindCompass({
 }) {
   const hasHdg = showDeviceHeading && deviceHeadingDeg !== null;
 
-  // Rose rotates opposite device heading (heading-up)
+    // Rose rotates opposite device heading (heading-up)
   const roseRotate = hasHdg ? -deviceHeadingDeg! : 0;
 
   // Needle is relative to device heading when enabled
@@ -715,12 +715,32 @@ function WindCompass({
   function round3(n: number) {
     return Math.round(n * 1000) / 1000;
   }
+
   function polar(deg: number, r: number) {
     const rad = (deg * Math.PI) / 180;
     return {
       x: round3(50 + r * Math.sin(rad)),
       y: round3(50 - r * Math.cos(rad)),
     };
+  }
+
+  function norm360(deg: number) {
+    return clamp360(deg);
+  }
+
+  // SVG arc path from start->end clockwise, with wrap handled outside
+  function arcPath(startDeg: number, endDeg: number, r: number) {
+    const a = polar(startDeg, r);
+    const b = polar(endDeg, r);
+
+    let sweep = endDeg - startDeg;
+    while (sweep < 0) sweep += 360;
+    while (sweep >= 360) sweep -= 360;
+
+    const largeArc = sweep > 180 ? 1 : 0;
+    const sweepFlag = 1; // clockwise
+
+    return `M ${a.x} ${a.y} A ${r} ${r} 0 ${largeArc} ${sweepFlag} ${b.x} ${b.y}`;
   }
 
   function textCardinal(letter: "N" | "E" | "S" | "W", x: number, y: number) {
@@ -766,7 +786,13 @@ function WindCompass({
   const rwy27Fill = rec === "27" ? "rgba(34,197,94,0.95)" : "rgba(255,255,255,0.92)";
 
   // runway: square ends, darker transparent gray
-  const rwy = { x: 22.5, y: 45.8, w: 55, h: 8.6, rx: 0 };
+  const rwy = {
+  w: 80,                 // ⬅ longer runway
+  h: 9.6,
+  x: 50 - 80 / 2,        // ⬅ keep centered
+  y: 45.8,
+  rx: 0,
+};
   const yC = rwy.y + rwy.h / 2;
 
   const needleFill = "rgba(120,130,145,0.55)";
@@ -779,6 +805,16 @@ function WindCompass({
   const R_TICK_MAJOR_IN = 45.6; // shorter
   const R_TICK_MINOR_IN = 46.8;
   const R_TICK_MICRO_IN = 47.6;
+
+  // Gust spread arc config
+  const spreadDeg = variabilityDeg !== null ? Math.max(0, Math.min(180, variabilityDeg)) : 0;
+  const centerDeg = windFromDeg ?? 0;
+  const showSpreadArc = spreadDeg >= 8;
+
+
+  const startDeg = norm360(centerDeg - spreadDeg / 2);
+  const endDeg = norm360(centerDeg + spreadDeg / 2);
+  const spreadWraps = endDeg < startDeg;
 
   // cardinals: pushed out, equal distance from ring
   const CARD_PAD = 7.8;
@@ -843,6 +879,40 @@ function WindCompass({
                 );
               })}
 
+              {/* Gust / variable spread arc */}
+              {showSpreadArc ? (
+                <g>
+                  {(() => {
+                    const rArc = 43.8; // tweak 41–45
+                    const swArc = 3.2; // thickness
+
+                    const arc1 = spreadWraps ? arcPath(startDeg, 360, rArc) : arcPath(startDeg, endDeg, rArc);
+                    const arc2 = spreadWraps ? arcPath(0, endDeg, rArc) : null;
+
+                    return (
+                      <>
+                        <path
+                          d={arc1}
+                          fill="none"
+                          stroke="rgba(255,255,255,0.18)"
+                          strokeWidth={swArc}
+                          strokeLinecap="round"
+                        />
+                        {arc2 ? (
+                          <path
+                            d={arc2}
+                            fill="none"
+                            stroke="rgba(255,255,255,0.18)"
+                            strokeWidth={swArc}
+                            strokeLinecap="round"
+                          />
+                        ) : null}
+                      </>
+                    );
+                  })()}
+                </g>
+              ) : null}
+
               {/* runway */}
               <g>
                 <rect x={rwy.x} y={rwy.y} width={rwy.w} height={rwy.h} rx={rwy.rx} fill="rgba(55,65,80,0.55)" />
@@ -901,8 +971,8 @@ function WindCompass({
             {/* Airplane icon — ONLY when device compass is ON (behind needle) */}
             {showDeviceHeading ? (
               <g transform="translate(50 50)">
-                {/* Your outline points RIGHT; rotate 90 to point UP, then +180 because you asked. */}
-                <g transform="rotate(90) scale(90)">
+                {/* Your outline points RIGHT; rotate 90 to point UP, then +180 as requested => 270 total */}
+                <g transform="rotate(270) scale(65)">
                   <path
                     d={PLANE_OUTLINE_PATH}
                     fill="rgba(255,255,255,0.10)"
@@ -915,75 +985,84 @@ function WindCompass({
             ) : null}
 
             {/* Wind needle — ALWAYS visible */}
-            <g transform={`rotate(${needleRotate} 50 50)`}>
-              <path
-                d="
-                  M 50 9
-                  L 52.1 28.3
-                  L 54.1 50
-                  L 54.1 59
-                  L 50 65
-                  L 45.9 59
-                  L 45.9 50
-                  L 47.9 28.3 Z
-                "
-                fill={needleFill}
-                stroke={needleOuter}
-                strokeWidth="1.05"
-                strokeLinejoin="round"
-              />
+<g transform={`rotate(${needleRotate} 50 50)`}>
+  <path
+    d="
+      M 50 9
+      L 52.1 28.3
+      L 54.1 50
+      L 54.1 59
+      L 50 65
+      L 45.9 59
+      L 45.9 50
+      L 47.9 28.3 Z
+    "
+    fill={needleFill}
+    stroke={needleOuter}
+    strokeWidth="1.05"
+    strokeLinejoin="round"
+  />
 
-              <path
-                d="
-                  M 50 9
-                  L 51.4 28.3
-                  L 52.6 50
-                  L 52.6 59
-                  L 50 64
-                  L 47.4 59
-                  L 47.4 50
-                  L 48.6 28.3 Z
-                "
-                fill="none"
-                stroke={needleMid}
-                strokeOpacity="0.9"
-                strokeWidth="0.4"
-                strokeLinejoin="round"
-              />
+  <path
+    d="
+      M 50 9
+      L 51.4 28.3
+      L 52.6 50
+      L 52.6 59
+      L 50 64
+      L 47.4 59
+      L 47.4 50
+      L 48.6 28.3 Z
+    "
+    fill="none"
+    stroke={needleMid}
+    strokeOpacity="0.9"
+    strokeWidth="0.4"
+    strokeLinejoin="round"
+  />
 
-              <circle cx="50" cy="50" r="3.3" fill="rgba(255,255,255,0.10)" />
-              <circle cx="50" cy="50" r="2.2" fill="#0b0f14" stroke="rgba(255,255,255,0.35)" strokeWidth="0.55" />
+  <circle cx="50" cy="50" r="3.3" fill="rgba(255,255,255,0.10)" />
+  <circle
+    cx="50"
+    cy="50"
+    r="2.2"
+    fill="#0b0f14"
+    stroke="rgba(255,255,255,0.35)"
+    strokeWidth="0.55"
+  />
 
-              {/* direction bubble at tail */}
-              <g>
-                <rect
-                  x={50 - 7.0}
-                  y={71.4}
-                  width={14.0}
-                  height={7.4}
-                  rx={2.4}
-                  fill="rgba(0,0,0,0.55)"
-                  stroke="rgba(255,255,255,0.18)"
-                  strokeWidth="0.5"
-                />
-                <text
-                  x="50"
-                  y={71.4 + 5.2}
-                  textAnchor="middle"
-                  fontSize="4.0"
-                  fill="rgba(255,255,255,0.92)"
-                  fontFamily='ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto'
-                  fontWeight="800"
-                >
-                  {dirLabel}
-                </text>
-              </g>
-            </g>
+  {/* direction bubble at tail (COUNTER-ROTATE so it stays upright) */}
+  <g transform={`rotate(${-needleRotate} 50 50)`}>
+    <rect
+      x={50 - 7.0}
+      y={71.4}
+      width={14.0}
+      height={7.4}
+      rx={2.4}
+      fill="rgba(0,0,0,0.55)"
+      stroke="rgba(255,255,255,0.18)"
+      strokeWidth="0.5"
+    />
+    <text
+      x="50"
+      y={71.4 + 5.2}
+      textAnchor="middle"
+      fontSize="4.0"
+      fill="rgba(255,255,255,0.92)"
+      fontFamily='ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto'
+      fontWeight="800"
+    >
+      {dirLabel}
+    </text>
+  </g>
+</g>
+
           </svg>
         </div>
       </div>
     </div>
   );
+
 }
 
 /**
