@@ -146,7 +146,14 @@ export async function fetchAdvisoryFromPublishedCsv(): Promise<AdvisoryPayload> 
   async function fetchOnce(csvUrl: string, extraCb: number) {
     const cb = Math.floor(Date.now() / 5000) + extraCb;
     const sep = csvUrl.includes("?") ? "&" : "?";
-    const res = await fetch(`${csvUrl}${sep}cb=${cb}`, { cache: "no-store" });
+    const res = await fetch(`${csvUrl}${sep}cb=${cb}`, {
+      cache: "no-store",
+      next: { revalidate: 0 },
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/csv,text/plain,*/*",
+      },
+    });
     if (!res.ok) throw new Error(`Advisory fetch HTTP ${res.status}`);
     const txt = await res.text();
     return parseAdvisoryCsv(txt);

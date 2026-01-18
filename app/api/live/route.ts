@@ -1,42 +1,51 @@
 // app/api/live/route.ts
-import { fetchLatestWxFromLoki } from "../../../lib/loki";
-import { normalizeWx } from "../../../lib/tf";
-import { fetchAdvisoryFromPublishedCsv } from "../../../lib/advisory";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+import { NextResponse } from "next/server";
+import { fetchLatestWxFromLoki } from "@/lib/loki";
+import { normalizeWx } from "@/lib/tf";
+import { fetchAdvisoryFromPublishedCsv, type AdvisoryPayload } from "@/lib/advisory";
 
 export async function GET() {
+  const nowS = Math.floor(Date.now() / 1000);
+
+  // 1) Loki -> normalize
+  const raw = await fetchLatestWxFromLoki();
+  const wx = normalizeWx(raw);
+
+  // 2) Sheets advisory (never derived from rec_reason)
+  let adv: AdvisoryPayload = {
+    advisory: null,
+    advisory_ts_unix_s: null,
+    advisory_color: null,
+  };
+
   try {
-    const [raw, adv] = await Promise.all([
-      fetchLatestWxFromLoki(),
-      fetchAdvisoryFromPublishedCsv(),
-    ]);
-
-    const wx = normalizeWx(raw);
-
-    const now_s = Math.floor(Date.now() / 1000);
-    const advisory_age_s =
-      typeof adv?.advisory_ts_unix_s === "number"
-        ? Math.max(0, now_s - adv.advisory_ts_unix_s)
-        : null;
-
-    return Response.json(
-      {
-        ...(wx ?? { ok: true, found: false }),
-        advisory: adv?.advisory ?? null,
-        advisory_ts_unix_s: adv?.advisory_ts_unix_s ?? null,
-        advisory_age_s,
-
-        // ✅ NEW: pass through Sheets-selected color
-        advisory_color: adv?.advisory_color ?? null,
-      },
-      { headers: { "Cache-Control": "no-store" } }
-    );
-  } catch (err: any) {
-    return Response.json(
-      { ok: false, message: err?.message || String(err) },
-      { status: 500 }
-    );
+    adv = await fetchAdvisoryFromPublishedCsv();
+  } catch (e) {
+    console.error("Advisory fetch failed:", e);
   }
+
+  const advisory_ts_unix_s = adv.advisory_ts_unix_s;
+  const advisory_age_s = advisory_ts_unix_s ? Math.max(0, nowS - advisory_ts_unix_s) : null;
+
+  const merged = {
+    ...(wx || {}),
+
+    // Always include these fields (even if null)
+    advisory: adv.advisory,
+    advisory_ts_unix_s,
+    advisory_age_s,
+    advisory_color: adv.advisory_color,
+  };
+
+  return NextResponse.json(merged, {
+    headers: {
+      "Cache-Control": "no-store, max-age=0",
+    },
+  });
 }
+
 
