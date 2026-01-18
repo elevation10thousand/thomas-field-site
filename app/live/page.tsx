@@ -190,7 +190,7 @@ function fmtAge(ageSec: number) {
 }
 
 // Smooth angle (wrap-aware). Lower alpha = smoother
-function smoothAngle(prev: number, next: number, alpha = 0.055) {
+function smoothAngle(prev: number, next: number, alpha = 0.045) {
   let d = next - prev;
   if (d > 180) d -= 360;
   if (d < -180) d += 360;
@@ -394,12 +394,21 @@ export default function LivePage() {
 
       // iOS Safari uses webkitCompassHeading (0 = North)
       let hdg: number | null = null;
-      if (typeof anyE.webkitCompassHeading === "number") {
-        hdg = anyE.webkitCompassHeading;
-      } else if (typeof e.alpha === "number") {
-        // many browsers: alpha is 0 at North, increases clockwise
-        hdg = e.alpha;
-      }
+
+// iOS Safari: true heading
+if (typeof anyE.webkitCompassHeading === "number") {
+  hdg = anyE.webkitCompassHeading;
+} else if (typeof e.alpha === "number") {
+  // Android/others: alpha may be relative; try to correct for screen orientation.
+  // (This helps when the user rotates the phone / landscape vs portrait.)
+  const screenAngle =
+    typeof window !== "undefined" && typeof (window.screen as any)?.orientation?.angle === "number"
+      ? (window.screen as any).orientation.angle
+      : (window as any).orientation || 0;
+
+  hdg = e.alpha + screenAngle;
+}
+
 
       if (hdg === null || !Number.isFinite(hdg)) return;
       const next = clamp360(hdg);
@@ -856,7 +865,7 @@ function WindCompass({
             {showDeviceHeading ? (
               <g transform="translate(50 50)">
                 {/* Path points to the RIGHT originally; rotate -90 so nose points UP */}
-                <g transform="rotate(-90) scale(18)">
+                <g transform="rotate(90) scale(75)">
                   <path
                     d={PLANE_OUTLINE_PATH}
                     fill="rgba(255,255,255,0.10)"
