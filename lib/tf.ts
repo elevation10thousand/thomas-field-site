@@ -35,6 +35,12 @@ export type ThomasWx = {
   uptime_ms?: number;
   ip?: string;
   rssi?: number;
+
+  // GPS
+  gps_fix?: number;
+  gps_lat?: number;
+  gps_lon?: number;
+  gps_alt_m?: number;
 };
 
 type AnyObj = Record<string, any>;
@@ -103,9 +109,14 @@ export function normalizeWx(raw: any): ThomasWx | null {
     uptime_ms: num(j.uptime_ms),
     ip: typeof j.ip === "string" ? j.ip : undefined,
     rssi: int(j.rssi),
+
+    gps_fix: int(j.gps_fix),
+    gps_lat: num(j.gps_lat),
+    gps_lon: num(j.gps_lon),
+    gps_alt_m: num(j.gps_alt_m),
   };
 
-  // normalize direction values into 0..360 for consistency
+  // Normalize wind directions
   if (typeof out.wind_dir_deg === "number") out.wind_dir_deg = norm360(out.wind_dir_deg);
   if (typeof out.wind_dir_avg_deg === "number") out.wind_dir_avg_deg = norm360(out.wind_dir_avg_deg);
   if (typeof out.wind_dir_gust_deg === "number") out.wind_dir_gust_deg = norm360(out.wind_dir_gust_deg);
@@ -114,26 +125,6 @@ export function normalizeWx(raw: any): ThomasWx | null {
 }
 
 /* ---------------- derived helpers ---------------- */
-
-export function ageSeconds(wx: ThomasWx, nowMs: number): number {
-  const ts = wx?.ts_unix_s;
-  if (typeof ts !== "number" || !Number.isFinite(ts) || ts <= 0) return NaN;
-  return nowMs / 1000 - ts;
-}
-
-// Use wind_dir_deg first. Fallback avg, then gust dir.
-export function pickWindDirDeg(wx: ThomasWx): number | null {
-  const d = wx?.wind_dir_deg;
-  if (typeof d === "number" && Number.isFinite(d)) return norm360(d);
-
-  const a = wx?.wind_dir_avg_deg;
-  if (typeof a === "number" && Number.isFinite(a)) return norm360(a);
-
-  const g = wx?.wind_dir_gust_deg;
-  if (typeof g === "number" && Number.isFinite(g)) return norm360(g);
-
-  return null;
-}
 
 function zuluTime(tsUnixS: number): string {
   const d = new Date(tsUnixS * 1000);
@@ -148,46 +139,59 @@ function metarAltA(wx: ThomasWx): string {
   return `A${String(Math.round(a * 100)).padStart(4, "0")}`;
 }
 
+function pickWindDirDeg(wx: ThomasWx): number | null {
+  if (typeof wx.wind_dir_deg === "number") return wx.wind_dir_deg;
+  if (typeof wx.wind_dir_avg_deg === "number") return wx.wind_dir_avg_deg;
+  if (typeof wx.wind_dir_gust_deg === "number") return wx.wind_dir_gust_deg;
+  return null;
+}
+
 function metarWind(wx: ThomasWx): string {
-  const spd = wx?.wind_speed_kt;
-  const gst = wx?.wind_gust_kt;
+  const spd = wx.wind_speed_kt;
+  const gst = wx.wind_gust_kt;
   const dir = pickWindDirDeg(wx);
 
-  // CALM
-  if (typeof spd === "number" && Number.isFinite(spd) && spd < 2) return "CALM";
+  if (typeof spd === "number" && spd < 2) return "CALM";
 
   const dirStr = dir === null ? "///" : String(Math.round(dir)).padStart(3, "0");
-  const spdStr =
-    typeof spd === "number" && Number.isFinite(spd) ? String(Math.round(spd)).padStart(2, "0") : "__";
+  const spdStr = typeof spd === "number" ? String(Math.round(spd)).padStart(2, "0") : "__";
 
   const gustOk =
     typeof gst === "number" &&
-    Number.isFinite(gst) &&
     typeof spd === "number" &&
-    Number.isFinite(spd) &&
     gst >= spd + 2;
 
-  const gustStr = gustOk ? `G${String(Math.round(gst!)).padStart(2, "0")}` : "";
+  const gustStr = gustOk ? `G${String(Math.round(gst)).padStart(2, "0")}` : "";
 
   return `${dirStr}${spdStr}${gustStr}KT`;
 }
 
 /**
- * Single top line in the order you want:
- * Field, time, wind (or CALM), temp, dp, alt, DA
+ * METAR-like top line
+ * EXACT FORMAT REQUESTED:
+ * Thomas_FLD 0616Z 00014G33KT  CB 4300ftAGL  TEMP 22.4F  DP 3.4F  A2998  DA 9775ft
  */
 export function metarTopLine(wx: ThomasWx): string {
   const station = "Thomas_FLD";
-  const z = wx?.ts_unix_s ? zuluTime(wx.ts_unix_s) : "----Z";
+  const z = wx.ts_unix_s ? zuluTime(wx.ts_unix_s) : "----Z";
   const w = metarWind(wx);
 
-  const t = typeof wx?.temp_f === "number" && Number.isFinite(wx.temp_f) ? `${wx.temp_f.toFixed(1)}F` : "—";
-  const dp = typeof wx?.dewpoint_f === "number" && Number.isFinite(wx.dewpoint_f) ? `${wx.dewpoint_f.toFixed(1)}F` : "—";
+  const cb =
+    typeof wx.cloud_base_agl_ft === "number"
+      ? `${Math.round(wx.cloud_base_agl_ft)}ftAGL`
+      : "—";
+
+  const t = typeof wx.temp_f === "number" ? `${wx.temp_f.toFixed(1)}F` : "—";
+  const dp = typeof wx.dewpoint_f === "number" ? `${wx.dewpoint_f.toFixed(1)}F` : "—";
 
   const a = metarAltA(wx);
-  const da = typeof wx?.da_ft === "number" && Number.isFinite(wx.da_ft) ? `${Math.round(wx.da_ft)}ft` : "—";
+  const da = typeof wx.da_ft === "number" ? `${Math.round(wx.da_ft)}ft` : "—";
 
-  // IMPORTANT: alt AFTER DP (your request)
-  return `${station} ${z} ${w}  TEMP ${t}  DP ${dp}  ${a}  DA ${da}`;
+  return `${station} ${z} ${w}  CB ${cb}  TEMP ${t}  DP ${dp}  ${a}  DA ${da}`;
 }
+
+
+
+
+
 
