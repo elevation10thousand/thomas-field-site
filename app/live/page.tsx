@@ -681,7 +681,16 @@ function WindCompass({
   recRwy: string;
 }) {
   const roseRotate = showDeviceHeading && deviceHeadingDeg !== null ? -deviceHeadingDeg : 0;
-  const windDeg = windFromDeg !== null ? windFromDeg : 0;
+
+  // IMPORTANT: when device compass is on, rotate wind needle by the same rose rotation
+  const baseWindDeg = windFromDeg !== null ? windFromDeg : 0;
+  const windDegShown = baseWindDeg + roseRotate;
+
+  function clamp360Local(deg: number) {
+    let d = deg % 360;
+    if (d < 0) d += 360;
+    return d;
+  }
 
   function round3(n: number) {
     return Math.round(n * 1000) / 1000;
@@ -701,18 +710,19 @@ function WindCompass({
         y={y}
         textAnchor="middle"
         dominantBaseline="middle"
-        fontSize="5.6"
+        fontSize="5.2"
         fill="rgba(255,255,255,0.72)"
         fontFamily='ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto'
         fontWeight="700"
-        letterSpacing="1.1"
+        letterSpacing="1.0"
       >
         {letter}
       </text>
     );
   }
 
-  const dirLabel = windFromDeg === null ? "---°" : `${String(Math.round(windFromDeg)).padStart(3, "0")}°`;
+  const dirLabel =
+    windFromDeg === null ? "---°" : `${String(Math.round(clamp360Local(windFromDeg))).padStart(3, "0")}°`;
 
   const windLabel = windKt === null ? "—" : windKt < 2 ? "CALM" : `${Math.round(windKt)}kt`;
   const gustLabel = gustKt === null ? "—" : `${Math.round(gustKt)}kt`;
@@ -735,6 +745,7 @@ function WindCompass({
   const rwy09Fill = rec === "09" ? "rgba(34,197,94,0.95)" : "rgba(255,255,255,0.92)";
   const rwy27Fill = rec === "27" ? "rgba(34,197,94,0.95)" : "rgba(255,255,255,0.92)";
 
+  // runway: square ends, darker transparent gray
   const rwy = { x: 20, y: 45.2, w: 60, h: 9.6, rx: 0 };
   const yC = rwy.y + rwy.h / 2;
 
@@ -742,13 +753,15 @@ function WindCompass({
   const needleOuter = "rgba(255,255,255,1)";
   const needleMid = "rgba(156,163,175,0.90)";
 
+  // instrument-grade geometry
   const R_OUT = 45.8;
-  const R_TICK_OUT = 48.2;
-  const R_TICK_MAJOR_IN = 43.6;
-  const R_TICK_MINOR_IN = 45.1;
-  const R_TICK_MICRO_IN = 46.2;
+  const R_TICK_OUT = 49.0;        // pushed out farther
+  const R_TICK_MAJOR_IN = 44.7;   // smaller ticks (shorter)
+  const R_TICK_MINOR_IN = 46.1;
+  const R_TICK_MICRO_IN = 47.0;
 
-  const CARD_PAD = 6.4;
+  // cardinals: pushed out more, equal distance
+  const CARD_PAD = 8.0;
   const N_Y = 50 - (R_OUT + CARD_PAD);
   const S_Y = 50 + (R_OUT + CARD_PAD);
   const E_X = 50 + (R_OUT + CARD_PAD);
@@ -757,6 +770,7 @@ function WindCompass({
   return (
     <div className="rounded-3xl border border-neutral-800 bg-neutral-950/35 p-4 w-full overflow-hidden">
       <div className="relative">
+        {/* 4 corner metrics */}
         <div className="pointer-events-none absolute left-0 top-0 text-left">
           <div className="text-[11px] tracking-wider uppercase text-neutral-400">Wind</div>
           <div className="text-3xl leading-none font-semibold text-neutral-100">{windLabel}</div>
@@ -777,14 +791,22 @@ function WindCompass({
           <div className="text-3xl leading-none font-semibold text-neutral-100">{hdgText}</div>
         </div>
 
-        {/* ✅ Larger compass, but keep padding so N/S never clip */}
-        <div className="mx-auto aspect-square w-full max-w-[560px] pt-16 pb-16">
-          <svg viewBox="-6 -12 112 124" className="h-full w-full block" role="img" aria-label="Wind vs runway 09/27">
+        {/* Slightly larger compass, but viewBox padded so N/S never clip */}
+        <div className="mx-auto aspect-square w-full max-w-[620px] pt-14 pb-14">
+          <svg
+            viewBox="-10 -18 120 136"
+            className="h-full w-full block"
+            role="img"
+            aria-label="Wind direction vs runway 09/27"
+          >
+            {/* rings */}
             <circle cx="50" cy="50" r={R_OUT} fill="none" stroke="rgba(255,255,255,0.10)" strokeWidth="2.2" />
             <circle cx="50" cy="50" r="39" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="0.8" />
             <circle cx="50" cy="50" r="31" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="0.8" />
 
+            {/* Rose rotates with device heading */}
             <g transform={`rotate(${roseRotate} 50 50)`}>
+              {/* ticks: square ends, pushed outward; 30° marks whiter */}
               {Array.from({ length: 72 }).map((_, i) => {
                 const deg = i * 5;
                 const isMajor = deg % 30 === 0;
@@ -794,12 +816,12 @@ function WindCompass({
                 const b = polar(deg, isMajor ? R_TICK_MAJOR_IN : isMinor ? R_TICK_MINOR_IN : R_TICK_MICRO_IN);
 
                 const stroke = isMajor
-                  ? "rgba(255,255,255,0.88)"
+                  ? "rgba(255,255,255,0.90)"
                   : isMinor
-                  ? "rgba(255,255,255,0.26)"
-                  : "rgba(255,255,255,0.16)";
+                  ? "rgba(255,255,255,0.24)"
+                  : "rgba(255,255,255,0.14)";
 
-                const sw = isMajor ? 0.95 : isMinor ? 0.62 : 0.44;
+                const sw = isMajor ? 0.88 : isMinor ? 0.56 : 0.40;
 
                 return (
                   <line
@@ -815,6 +837,7 @@ function WindCompass({
                 );
               })}
 
+              {/* runway */}
               <g>
                 <rect x={rwy.x} y={rwy.y} width={rwy.w} height={rwy.h} rx={rwy.rx} fill="rgba(55,65,80,0.55)" />
                 <rect
@@ -844,8 +867,8 @@ function WindCompass({
                   y={yC}
                   textAnchor="middle"
                   dominantBaseline="middle"
-                  fontSize="5.4"
-                  letterSpacing="0.8"
+                  fontSize="5.2"
+                  letterSpacing="0.7"
                   fontFamily='ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto'
                   fontWeight="650"
                   fill={rwy09Fill}
@@ -859,8 +882,8 @@ function WindCompass({
                   y={yC}
                   textAnchor="middle"
                   dominantBaseline="middle"
-                  fontSize="5.4"
-                  letterSpacing="0.8"
+                  fontSize="5.2"
+                  letterSpacing="0.7"
                   fontFamily='ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto'
                   fontWeight="650"
                   fill={rwy27Fill}
@@ -870,42 +893,118 @@ function WindCompass({
                 </text>
               </g>
 
+              {/* cardinals OUTSIDE the ring */}
               {textCardinal("N", 50, N_Y)}
               {textCardinal("E", E_X, 50)}
               {textCardinal("S", 50, S_Y)}
               {textCardinal("W", W_X, 50)}
             </g>
 
-            <g transform={`rotate(${windDeg} 50 50)`}>
+            {/* airplane icon (only when using device compass) - fixed to screen */}
+            {showDeviceHeading ? (
+              <g transform="translate(50 50)">
+                {/* subtle glow */}
+                <path
+                  d="M 0 -10 L 2 -3 L 10 0 L 2 3 L 0 10 L -2 3 L -10 0 L -2 -3 Z"
+                  fill="rgba(59,130,246,0.25)"
+                />
+                {/* simple airplane silhouette */}
+                <path
+                  d="
+                    M 0 -14
+                    C 1 -14 2 -13 2 -12
+                    L 2 -5
+                    L 10 -1
+                    C 11 -1 11 1 10 1
+                    L 2 5
+                    L 2 10
+                    C 2 11 1 12 0 12
+                    C -1 12 -2 11 -2 10
+                    L -2 5
+                    L -10 1
+                    C -11 1 -11 -1 -10 -1
+                    L -2 -5
+                    L -2 -12
+                    C -2 -13 -1 -14 0 -14
+                    Z
+                  "
+                  fill="rgba(96,165,250,0.95)"
+                  stroke="rgba(255,255,255,0.85)"
+                  strokeWidth="0.6"
+                  strokeLinejoin="round"
+                />
+              </g>
+            ) : null}
+
+            {/* wind needle rotates with wind direction (and device when enabled) */}
+            <g transform={`rotate(${windDegShown} 50 50)`}>
               <path
-                d="M 50 9 L 52.1 28.3 L 54.1 50 L 54.1 59 L 50 65 L 45.9 59 L 45.9 50 L 47.9 28.3 Z"
+                d="
+                  M 50 9
+                  L 52.1 28.3
+                  L 54.1 50
+                  L 54.1 59
+                  L 50 65
+                  L 45.9 59
+                  L 45.9 50
+                  L 47.9 28.3 Z
+                "
                 fill={needleFill}
                 stroke={needleOuter}
                 strokeWidth="1.05"
                 strokeLinejoin="round"
               />
+
               <path
-                d="M 50 10.2 L 51.7 29.1 L 53.3 50 L 53.3 58.3 L 50 63.8 L 46.7 58.3 L 46.7 50 L 48.3 29.1 Z"
+                d="
+                  M 50 10.2
+                  L 51.7 29.1
+                  L 53.3 50
+                  L 53.3 58.3
+                  L 50 63.8
+                  L 46.7 58.3
+                  L 46.7 50
+                  L 48.3 29.1 Z
+                "
                 fill="none"
                 stroke={needleMid}
                 strokeOpacity="0.9"
                 strokeWidth="0.7"
                 strokeLinejoin="round"
               />
+
               <path
-                d="M 50 11.6 L 51.0 30.5 L 52.3 50 L 52.3 57.6 L 50 62.6 L 47.7 57.6 L 47.7 50 L 49.0 30.5 Z"
+                d="
+                  M 50 11.6
+                  L 51.0 30.5
+                  L 52.3 50
+                  L 52.3 57.6
+                  L 50 62.6
+                  L 47.7 57.6
+                  L 47.7 50
+                  L 49.0 30.5 Z
+                "
                 fill="none"
                 stroke={needleOuter}
                 strokeWidth="0.35"
                 strokeLinejoin="round"
               />
 
-              <rect x="49.2" y="65.0" width="1.6" height="4.8" rx="0.5" fill={needleFill} stroke={needleOuter} strokeWidth="0.45" />
-              <rect x="49.35" y="65.15" width="1.3" height="4.5" rx="0.45" fill="none" stroke={needleMid} strokeWidth="0.35" />
+              <rect
+                x="49.2"
+                y="65.0"
+                width="1.6"
+                height="4.8"
+                rx="0.5"
+                fill={needleFill}
+                stroke={needleOuter}
+                strokeWidth="0.45"
+              />
 
               <circle cx="50" cy="50" r="3.3" fill="rgba(255,255,255,0.10)" />
               <circle cx="50" cy="50" r="2.2" fill="#0b0f14" stroke="rgba(255,255,255,0.35)" strokeWidth="0.55" />
 
+              {/* direction bubble at tail */}
               <g>
                 <rect
                   x={50 - 7.0}
@@ -936,11 +1035,3 @@ function WindCompass({
     </div>
   );
 }
-
-
-
-
-
-
-
-
