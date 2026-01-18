@@ -407,7 +407,7 @@ export default function LivePage() {
             ? (window.screen as any).orientation.angle
             : (window as any).orientation || 0;
 
-        hdg = e.alpha + screenAngle;
+        hdg = 360 - e.alpha + screenAngle;
       }
 
       if (hdg === null || !Number.isFinite(hdg)) return;
